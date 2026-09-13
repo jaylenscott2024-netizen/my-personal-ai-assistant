@@ -14,20 +14,38 @@ const SETUP_TIMEOUT_MS = 10_000;
 
 // Gemini Live (BidiGenerateContent) as a RealtimeVisualSink.
 //
-// UNVERIFIED AGAINST THE LIVE API: this is written to Google's documented
-// Live API message shapes (`setup` → `setupComplete`, then `realtimeInput`
-// media chunks), but this environment has no Gemini API key and no
-// outbound access to that endpoint, so it has never completed a real
-// session. Treat it as reviewed, standards-based code — not as a verified
-// integration. Everything *around* it (negotiation, pacing, coalescing,
-// fallback to the still-image transport) is fully unit-tested with a fake
-// sink and does not depend on this class working.
+// UNVERIFIED AGAINST THE LIVE API: this environment has no Gemini API key
+// and its egress proxy blocks ai.google.dev, so this has never completed
+// a real session — a web search (not a live doc fetch, which was blocked)
+// was used to re-check the message shapes below, so treat this as
+// reviewed-against-secondary-sources, not confirmed against the primary
+// reference. Everything *around* this class (negotiation, pacing,
+// coalescing, fallback to the still-image transport) is fully unit-tested
+// with a fake sink and does not depend on this class working.
 //
-// Note on rate: the Live API does not advertise an accepted frame rate in
-// its setup response, so `serverAcceptedFps` is left unset and the
-// negotiated rate comes from the model's declared ceiling
-// (GEMINI_REALTIME_VISUAL_FPS). If a future API surface does advertise
-// one, pass it to negotiateRealtimeVisual() and it wins downward.
+// Message shapes, and confidence in each:
+//  - Endpoint + `?key=` query auth, and the `setup` → `setupComplete`
+//    handshake being mandatory before any other message: corroborated by
+//    multiple independent sources, high confidence.
+//  - `setup.model` as `models/<id>`: same, high confidence.
+//  - A single video/image frame goes in `realtimeInput.video: {mimeType,
+//    data}` — a dedicated typed field, NOT the older `realtimeInput.
+//    mediaChunks` array this file previously (incorrectly) used for
+//    frames. `mediaChunks` still appears in some audio examples; audio
+//    is not this sink's concern, so it isn't touched here. Moderate-high
+//    confidence — corroborated by two independent secondary sources, but
+//    not the primary reference page (blocked).
+//  - Video is documented as processed at a hard ceiling of 1 fps
+//    regardless of what's sent faster than that — matches this codebase's
+//    own default (`GEMINI_REALTIME_VISUAL_FPS=1`) with no change needed.
+//  - API version segment (`v1beta` here vs. `v1alpha` seen in one older
+//    example) and the exact `generationConfig.responseModalities` shape
+//    are the lowest-confidence details in this file — left as-is rather
+//    than "corrected" on ambiguous secondary evidence.
+//
+// Bottom line: this is a good-faith, partially re-verified best effort,
+// not a confirmed integration. Validate against a real API key and the
+// primary reference (https://ai.google.dev/api/live) before relying on it.
 export class GeminiLiveVisualSink implements RealtimeVisualSink {
   readonly id = "gemini-live";
   private socket: WebSocket | null = null;
@@ -97,10 +115,13 @@ export class GeminiLiveVisualSink implements RealtimeVisualSink {
 
   async sendFrame(sample: VisualSample): Promise<void> {
     if (!this.isOpen || !sample.frame) return;
+    // A single video/image frame is its own typed field, not an entry in
+    // the generic `mediaChunks` array (that shape is documented for audio,
+    // not confirmed for video — see the class-level note above).
     this.socket!.send(
       JSON.stringify({
         realtimeInput: {
-          mediaChunks: [{ mimeType: sample.frame.mimeType, data: sample.frame.base64 }],
+          video: { mimeType: sample.frame.mimeType, data: sample.frame.base64 },
         },
       }),
     );
