@@ -87,9 +87,11 @@ export interface VisualSample {
   dimensions: { width: number; height: number } | null;
   /** Semantic context from UI Automation, when available. */
   uiContext: VisualSampleUiContext | null;
-  /** Pixels, present ONLY when a keyframe was captured for this sample —
-   *  which happens solely on attention-significant change, in
-   *  structural_plus_visual mode, rate-limited. Never on a timer. */
+  /** Pixels, present only when this sample was materialized with a frame:
+   *  either a structural event captured on-demand, or a continuous-capture
+   *  tick that cleared the local processingFps gate or was significant
+   *  enough to bypass it. Most continuous-capture ticks carry no frame —
+   *  the tick itself (timestamp, change score, regions) is still recorded. */
   frame: VisualFrame | null;
 }
 
