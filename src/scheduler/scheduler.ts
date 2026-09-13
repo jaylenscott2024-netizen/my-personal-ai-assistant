@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { prisma } from "../database/client.js";
-import { createTask, transitionTask } from "../tasks/taskService.js";
+import { createTask } from "../tasks/taskService.js";
+import { runTask } from "../tasks/taskRunner.js";
 import { childLogger } from "../config/logger.js";
 import { notifyUser } from "../notifications/notificationService.js";
 
@@ -18,7 +19,9 @@ interface ScheduledJobHandle {
 
 const activeJobs = new Map<string, ScheduledJobHandle>();
 
-async function fireScheduledTask(scheduledTaskId: string): Promise<void> {
+// Exported for tests — the only way to actually exercise a scheduled
+// firing without waiting on a real cron interval.
+export async function fireScheduledTask(scheduledTaskId: string): Promise<void> {
   const scheduled = await prisma.scheduledTask.findUnique({ where: { id: scheduledTaskId } });
   if (!scheduled || !scheduled.enabled) return;
 
@@ -30,11 +33,25 @@ async function fireScheduledTask(scheduledTaskId: string): Promise<void> {
     return;
   }
 
-  const task = await createTask(scheduled.userId, template.title, template.goal);
-  await transitionTask(task.id, "planning", scheduled.userId);
-  await prisma.scheduledTask.update({ where: { id: scheduledTaskId }, data: { lastRunAt: new Date() } });
+  const user = await prisma.user.findUnique({ where: { id: scheduled.userId } });
+  if (!user) {
+    log.error({ scheduledTaskId, userId: scheduled.userId }, "scheduled task's user no longer exists");
+    return;
+  }
 
+  const task = await createTask(scheduled.userId, template.title, template.goal);
+  await prisma.scheduledTask.update({ where: { id: scheduledTaskId }, data: { lastRunAt: new Date() } });
   await notifyUser(scheduled.userId, "desktop", `Scheduled task started: ${template.title}`, `"${scheduled.name}" created task ${task.id}.`);
+
+  // Previously this stopped at transitioning the fresh task to "planning"
+  // — nothing ever actually ran it, so a scheduled task would tell the
+  // user it started and then genuinely never execute. runTask is the
+  // same call a live chat turn's task would go through (see
+  // tasks/taskRunner.ts): approvals, tool permissions, memory, and Eyes
+  // context all apply exactly as they would for anything the user typed.
+  await runTask(scheduled.userId, user.role, task.id).catch((err) => {
+    log.error({ err, scheduledTaskId, taskId: task.id }, "scheduled task execution failed");
+  });
   log.info({ scheduledTaskId, taskId: task.id }, "fired scheduled task");
 }
 
