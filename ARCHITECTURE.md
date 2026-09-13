@@ -168,12 +168,19 @@ OS events → VisualProvider → AttentionManager → VisualPerceptionEngine
 `VisualPerceptionEngine` (`src/eyes/*`) is the single continuous source: it
 maintains live `VisualState` from real OS events (Win32 `SetWinEventHook` +
 UI Automation handlers on Windows via a long-lived PowerShell/.NET helper;
-`UnsupportedVisualProvider` honestly elsewhere), records every accepted
-observation into a bounded in-memory `VisualHistory`, and fans samples out
-to subscribers — never a screenshot-polling loop, and never waiting on a
-model. `AttentionManager` scores salience and suppresses redundancy.
-Keyframes are captured only on attention-significant change, only in the
-opt-in `structural_plus_visual` mode, rate-limited and coalesced.
+`UnsupportedVisualProvider` honestly elsewhere), and — in the opt-in
+`structural_plus_visual` mode — real pixels flow continuously from the
+platform's native capture technology (Windows DXGI Desktop Duplication)
+for as long as Eyes runs, entirely independent of structural events. Every
+accepted observation, structural or continuous, is recorded into a
+bounded, three-tier in-memory `VisualHistory` (a high-frequency short
+buffer, a thinned longer-range buffer, and a salience-gated keyframe
+buffer) and fanned out to subscribers — never a screenshot-polling loop,
+and never waiting on a model. `AttentionManager` scores structural
+salience and suppresses redundancy; the engine itself enforces the local
+processing rate on the continuous stream, promoting observations into
+longer-range retention by significance rather than deciding whether
+capture happens at all.
 
 `ModelCapabilities.visionCapabilities` declares what each model's API
 really accepts (images / video / realtime, with rate and count ceilings),

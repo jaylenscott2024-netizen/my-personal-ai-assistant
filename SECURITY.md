@@ -197,10 +197,12 @@ Full detail in EYES.md; the security-relevant points:
   distinction from *transport* fallback: if Gemini's live visual session
   can't be opened, the adapter drops to sending still images, which
   changes how visual context is carried, not how it is perceived.
-- **Capture is attention-gated, not periodic**: keyframes require the
-  opt-in `structural_plus_visual` mode, a salience floor, a rate floor, and
-  no capture already in flight. The default mode captures nothing at all,
-  ever — structural perception needs zero pixels.
+- **Capture requires explicit opt-in, and retention is attention-gated**:
+  continuous pixel capture only ever starts in the opt-in
+  `structural_plus_visual` mode. The default mode captures nothing at all,
+  ever — structural perception needs zero pixels. Once capture is on,
+  attention/significance governs which observations survive into longer-
+  range retention, never whether capture happens in the first place.
 - **Frame payloads are never logged**, including by the Gemini Live sink,
   which logs only that a socket event occurred.
 
