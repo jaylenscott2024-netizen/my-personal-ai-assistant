@@ -4,21 +4,36 @@ import { ProviderError, RateLimitError } from "../../utils/errors.js";
 import { withRetry } from "../retry.js";
 import type {
   AIProvider,
+  ChatMessage,
   ChatRequest,
   ChatResponse,
   ChatStreamEvent,
   ModelCapabilities,
   ProviderHealth,
   ToolCallRequest,
+  VisionCapabilities,
 } from "../types.js";
 
 const API_BASE = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION = "2023-06-01";
 
-const MODEL_CAPS: Record<string, ModelCapabilities> = {
-  "claude-sonnet-5": cap(true, 200_000, true),
-  "claude-opus-5": cap(true, 200_000, true),
-  "claude-haiku-4-5-20251001": cap(true, 200_000, true),
+// Claude's Messages API takes still images as content blocks, and handles
+// several of them in one request as a coherent labelled sequence — which
+// is exactly what the temporal keyframe transport needs. It has no video
+// input and no live visual session, so those stay false: the transport
+// adapter must never try to send Claude something this doesn't declare.
+const CLAUDE_VISION: VisionCapabilities = {
+  imageInput: true,
+  videoInput: false,
+  realtimeVision: false,
+  realtimeAudio: false,
+  temporalImageContext: true,
+  videoUpload: false,
+  // A deliberately conservative operational cap (the API itself accepts
+  // more) — enough frames to show a before/after transition without
+  // spending a large share of the context window on imagery.
+  maxImagesPerRequest: 8,
+  preferredImageFormat: "image/png",
 };
 
 function cap(vision: boolean, ctx: number, reasoning: boolean): ModelCapabilities {
@@ -32,8 +47,17 @@ function cap(vision: boolean, ctx: number, reasoning: boolean): ModelCapabilitie
     reasoning,
     longContext: ctx >= 100_000,
     contextWindowTokens: ctx,
+    visionCapabilities: vision ? CLAUDE_VISION : undefined,
   };
 }
+
+// Declared after `cap` so the capability constant it closes over is
+// initialized first (these run at module load).
+const MODEL_CAPS: Record<string, ModelCapabilities> = {
+  "claude-sonnet-5": cap(true, 200_000, true),
+  "claude-opus-5": cap(true, 200_000, true),
+  "claude-haiku-4-5-20251001": cap(true, 200_000, true),
+};
 
 function defaultCaps(): ModelCapabilities {
   return cap(true, 200_000, true);
@@ -47,16 +71,14 @@ export function toAnthropicMessages(req: ChatRequest) {
 
   for (const m of req.messages) {
     if (m.role === "system") continue;
+    const visual = visualPartsOf(m);
     if (m.role === "tool") {
       // Anthropic's tool_result content accepts either a plain string or an
-      // array of blocks — an array is only needed when there's an image to
-      // attach (e.g. an on-demand Eyes frame), so the common no-image case
-      // keeps the original simple shape.
-      const resultContent = m.images?.length
-        ? [
-            { type: "text", text: m.content },
-            ...m.images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mimeType, data: img.base64 } })),
-          ]
+      // array of blocks — an array is only needed when there's something
+      // visual to attach (an Eyes frame, a temporal summary), so the common
+      // case keeps the original simple shape.
+      const resultContent = visual.hasAny
+        ? [{ type: "text", text: m.content }, ...visual.blocks]
         : m.content;
       messages.push({
         role: "user",
@@ -83,17 +105,31 @@ export function toAnthropicMessages(req: ChatRequest) {
     // it from an instruction even if the transport doesn't have a
     // dedicated content type for it (Section 66).
     const text = m.untrusted ? `<external_content trust="untrusted">\n${m.content}\n</external_content>` : m.content;
-    if (m.images?.length) {
-      const content: unknown[] = [
-        { type: "text", text },
-        ...m.images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mimeType, data: img.base64 } })),
-      ];
-      messages.push({ role: m.role === "user" ? "user" : "assistant", content });
+    if (visual.hasAny) {
+      messages.push({ role: m.role === "user" ? "user" : "assistant", content: [{ type: "text", text }, ...visual.blocks] });
     } else {
       messages.push({ role: m.role === "user" ? "user" : "assistant", content: text });
     }
   }
   return messages;
+}
+
+// Claude takes labelled images as content blocks. When the visual context
+// carries several keyframes, the label text block before each one is what
+// lets the model order them — without it, a set of images is just a set.
+function visualPartsOf(message: ChatMessage): { hasAny: boolean; blocks: unknown[] } {
+  const blocks: unknown[] = [];
+  const summary = message.visualContext?.temporalSummary;
+  if (summary) blocks.push({ type: "text", text: summary });
+
+  const images = message.visualContext?.images ?? message.images ?? [];
+  for (const image of images) {
+    const label = "label" in image ? image.label : undefined;
+    if (label) blocks.push({ type: "text", text: label });
+    blocks.push({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.base64 } });
+  }
+
+  return { hasAny: blocks.length > 0, blocks };
 }
 
 function fromAnthropicContent(content: Array<Record<string, unknown>>): { text: string; toolCalls: ToolCallRequest[] } {

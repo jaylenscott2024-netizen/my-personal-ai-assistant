@@ -4,20 +4,34 @@ import { ProviderError, RateLimitError } from "../../utils/errors.js";
 import { withRetry } from "../retry.js";
 import type {
   AIProvider,
+  ChatMessage,
   ChatRequest,
   ChatResponse,
   ChatStreamEvent,
   ModelCapabilities,
   ProviderHealth,
   ToolCallRequest,
+  VisionCapabilities,
 } from "../types.js";
 
 const API_BASE = "https://api.openai.com/v1";
 
-const MODEL_CAPS: Record<string, ModelCapabilities> = {
-  "gpt-4o": cap(true, 128_000),
-  "gpt-4o-mini": cap(true, 128_000),
-  "gpt-4-turbo": cap(true, 128_000),
+// These model ids are used against /chat/completions, which accepts still
+// images only — no video content, and no live visual session. OpenAI does
+// operate a separate Realtime API, but it is a different endpoint with
+// different model ids and is not what these capabilities describe, so
+// realtimeVision/realtimeAudio stay false here rather than being claimed
+// optimistically. The temporal keyframe transport is how visual *time*
+// reaches these models (see eyes/transport/openAIVisionAdapter.ts).
+const OPENAI_CHAT_VISION: VisionCapabilities = {
+  imageInput: true,
+  videoInput: false,
+  realtimeVision: false,
+  realtimeAudio: false,
+  temporalImageContext: true,
+  videoUpload: false,
+  maxImagesPerRequest: 6,
+  preferredImageFormat: "image/png",
 };
 
 function cap(vision: boolean, ctx: number): ModelCapabilities {
@@ -31,8 +45,17 @@ function cap(vision: boolean, ctx: number): ModelCapabilities {
     reasoning: false,
     longContext: ctx >= 100_000,
     contextWindowTokens: ctx,
+    visionCapabilities: vision ? OPENAI_CHAT_VISION : undefined,
   };
 }
+
+// Declared after `cap` so the capability constant it closes over is
+// initialized first (these run at module load).
+const MODEL_CAPS: Record<string, ModelCapabilities> = {
+  "gpt-4o": cap(true, 128_000),
+  "gpt-4o-mini": cap(true, 128_000),
+  "gpt-4-turbo": cap(true, 128_000),
+};
 
 function defaultCaps(): ModelCapabilities {
   return cap(false, 128_000);
@@ -48,19 +71,12 @@ export function toOpenAIMessages(req: ChatRequest) {
     } else if (m.role === "tool") {
       // OpenAI's chat.completions "tool" role message content must be a
       // plain string — image content parts are only valid on user/system
-      // messages. So an image attached to a tool result (e.g. an on-demand
-      // Eyes frame) rides in a synthetic follow-up user message instead of
+      // messages. So visual context attached to a tool result (e.g. Eyes
+      // keyframes) rides in a synthetic follow-up user message instead of
       // being dropped or sent in a shape the API would reject.
       messages.push({ role: "tool", tool_call_id: m.toolCallId, content: m.content });
-      if (m.images?.length) {
-        messages.push({
-          role: "user",
-          content: [
-            { type: "text", text: "Image attached to the preceding tool result:" },
-            ...m.images.map((img) => ({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.base64}` } })),
-          ],
-        });
-      }
+      const parts = visualPartsOf(m, "Visual context for the preceding tool result:");
+      if (parts.length > 0) messages.push({ role: "user", content: parts });
     } else if (m.role === "assistant" && m.toolCalls?.length) {
       messages.push({
         role: "assistant",
@@ -73,17 +89,35 @@ export function toOpenAIMessages(req: ChatRequest) {
       });
     } else {
       const text = m.untrusted ? `<external_content trust="untrusted">\n${m.content}\n</external_content>` : m.content;
-      if (m.images?.length) {
-        messages.push({
-          role: m.role,
-          content: [{ type: "text", text }, ...m.images.map((img) => ({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.base64}` } }))],
-        });
+      const parts = visualPartsOf(m);
+      if (parts.length > 0) {
+        messages.push({ role: m.role, content: [{ type: "text", text }, ...parts] });
       } else {
         messages.push({ role: m.role, content: text });
       }
     }
   }
   return messages;
+}
+
+// OpenAI vision content parts. Each image gets its own preceding text part
+// carrying the capture-time label, which is what turns a pile of stills
+// into a sequence the model can reason about temporally.
+function visualPartsOf(message: ChatMessage, leadIn?: string): Array<Record<string, unknown>> {
+  const parts: Array<Record<string, unknown>> = [];
+  const summary = message.visualContext?.temporalSummary;
+  const images = message.visualContext?.images ?? message.images ?? [];
+  if (images.length === 0 && !summary) return parts;
+
+  if (leadIn) parts.push({ type: "text", text: leadIn });
+  if (summary) parts.push({ type: "text", text: summary });
+
+  for (const image of images) {
+    const label = "label" in image ? image.label : undefined;
+    if (label) parts.push({ type: "text", text: label });
+    parts.push({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.base64}` } });
+  }
+  return parts;
 }
 
 export class OpenAIProvider implements AIProvider {

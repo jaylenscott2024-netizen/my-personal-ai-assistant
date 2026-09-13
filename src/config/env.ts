@@ -30,6 +30,14 @@ const envSchema = z.object({
   OPENAI_MODEL: z.string().default("gpt-4o"),
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().default("gemini-2.0-flash"),
+  // Declared ceilings for Gemini's visual transports, NOT properties of
+  // the Eyes engine itself — local perception runs at whatever rate the OS
+  // reports events, entirely independent of these (see EYES.md). Defaults
+  // match Gemini's documented 1 fps video sampling; raise them if your
+  // model/tier serves more. The Live session negotiates the effective rate
+  // at setup and uses the lower of declared vs. accepted.
+  GEMINI_VIDEO_FPS: z.coerce.number().positive().max(60).default(1),
+  GEMINI_REALTIME_VISUAL_FPS: z.coerce.number().positive().max(60).default(1),
   DEFAULT_AI_PROVIDER: z.enum(["anthropic", "openai", "gemini", "mock"]).default("mock"),
 
   // Voice

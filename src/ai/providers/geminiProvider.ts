@@ -4,23 +4,66 @@ import { ProviderError, RateLimitError } from "../../utils/errors.js";
 import { withRetry } from "../retry.js";
 import type {
   AIProvider,
+  ChatMessage,
   ChatRequest,
   ChatResponse,
   ChatStreamEvent,
   ModelCapabilities,
   ProviderHealth,
   ToolCallRequest,
+  VisionCapabilities,
 } from "../types.js";
 
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const MODEL_CAPS: Record<string, ModelCapabilities> = {
-  "gemini-2.0-flash": cap(1_000_000),
-  "gemini-1.5-pro": cap(2_000_000),
-  "gemini-1.5-flash": cap(1_000_000),
+  "gemini-2.0-flash": cap(1_000_000, "gemini-2.0-flash"),
+  "gemini-1.5-pro": cap(2_000_000, "gemini-1.5-pro"),
+  "gemini-1.5-flash": cap(1_000_000, "gemini-1.5-flash"),
 };
 
-function cap(ctx: number): ModelCapabilities {
+// Gemini is the one provider here whose visual input is NOT limited to
+// still images: the standard generateContent endpoint takes video inline
+// and via the Files API, and the Live (BidiGenerateContent) endpoint takes
+// a genuine realtime visual stream — but only on the models that actually
+// serve it. That last part is the trap this function exists to avoid:
+// "Gemini" is not one capability set, so the Live transport is offered
+// only for models whose id identifies them as Live models, and the real
+// frame rate is negotiated at session setup rather than assumed here.
+export function isGeminiLiveModel(model: string): boolean {
+  return /(?:^|[-_.])live(?:[-_.]|$)/i.test(model) || /flash-exp/i.test(model);
+}
+
+function geminiVisionFor(model: string): VisionCapabilities {
+  const standard: VisionCapabilities = {
+    imageInput: true,
+    videoInput: true,
+    realtimeVision: false,
+    realtimeAudio: false,
+    temporalImageContext: true,
+    videoUpload: true,
+    // A declared ceiling, not a universal truth: Gemini's documented
+    // default video sampling is 1 fps, and an operator whose model/tier
+    // allows more raises GEMINI_VIDEO_FPS rather than editing code.
+    maxVideoFps: env.GEMINI_VIDEO_FPS,
+    maxImagesPerRequest: 16,
+    preferredImageFormat: "image/png",
+    preferredVideoFormat: "video/mp4",
+  };
+
+  if (!isGeminiLiveModel(model)) return standard;
+  return {
+    ...standard,
+    realtimeVision: true,
+    realtimeAudio: true,
+    // Same reasoning: a configurable declared ceiling. The live session
+    // negotiates the effective rate at setup and takes the lower of the
+    // two (see eyes/transport/geminiRealtimeVisualTransport.ts).
+    maxRealtimeVisualFps: env.GEMINI_REALTIME_VISUAL_FPS,
+  };
+}
+
+function cap(ctx: number, model: string): ModelCapabilities {
   return {
     text: true,
     vision: true,
@@ -31,11 +74,12 @@ function cap(ctx: number): ModelCapabilities {
     reasoning: false,
     longContext: true,
     contextWindowTokens: ctx,
+    visionCapabilities: geminiVisionFor(model),
   };
 }
 
-function defaultCaps(): ModelCapabilities {
-  return cap(1_000_000);
+function defaultCaps(model: string): ModelCapabilities {
+  return cap(1_000_000, model);
 }
 
 // Gemini's generateContent API uses `contents` with roles "user"/"model"
@@ -50,10 +94,7 @@ export function toGeminiContents(req: ChatRequest) {
       // functionResponse part in the same "user"-role content entry, so an
       // image attached to a tool result (e.g. an on-demand Eyes frame)
       // rides in the same turn rather than needing a synthetic message.
-      const parts: unknown[] = [{ functionResponse: { name: m.toolCallId, response: { content: m.content } } }];
-      if (m.images?.length) {
-        for (const img of m.images) parts.push({ inlineData: { mimeType: img.mimeType, data: img.base64 } });
-      }
+      const parts: unknown[] = [{ functionResponse: { name: m.toolCallId, response: { content: m.content } } }, ...visualPartsOf(m)];
       contents.push({ role: "user", parts });
       continue;
     }
@@ -67,13 +108,27 @@ export function toGeminiContents(req: ChatRequest) {
       continue;
     }
     const text = m.untrusted ? `<external_content trust="untrusted">\n${m.content}\n</external_content>` : m.content;
-    const parts: unknown[] = [{ text }];
-    if (m.images?.length) {
-      for (const img of m.images) parts.push({ inlineData: { mimeType: img.mimeType, data: img.base64 } });
-    }
-    contents.push({ role: m.role === "assistant" ? "model" : "user", parts });
+    contents.push({ role: m.role === "assistant" ? "model" : "user", parts: [{ text }, ...visualPartsOf(m)] });
   }
   return contents;
+}
+
+// Gemini takes visual data as inlineData parts alongside text in the same
+// turn. A realtime_stream payload deliberately contributes no inlineData:
+// those frames already went over the live session, and re-embedding them
+// here would send the same imagery twice.
+function visualPartsOf(message: ChatMessage): unknown[] {
+  const parts: unknown[] = [];
+  const summary = message.visualContext?.temporalSummary;
+  if (summary) parts.push({ text: summary });
+
+  const images = message.visualContext?.images ?? message.images ?? [];
+  for (const image of images) {
+    const label = "label" in image ? image.label : undefined;
+    if (label) parts.push({ text: label });
+    parts.push({ inlineData: { mimeType: image.mimeType, data: image.base64 } });
+  }
+  return parts;
 }
 
 function stripJsonSchemaMeta(schema: Record<string, unknown>): Record<string, unknown> {
@@ -101,7 +156,7 @@ export class GeminiProvider implements AIProvider {
   }
 
   getCapabilities(model: string): ModelCapabilities {
-    return MODEL_CAPS[model] ?? defaultCaps();
+    return MODEL_CAPS[model] ?? defaultCaps(model);
   }
 
   listModels() {
