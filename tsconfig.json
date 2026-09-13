@@ -19,6 +19,6 @@
     "exactOptionalPropertyTypes": false,
     "allowJs": false
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "prisma/seed.ts"],
+  "include": ["src/**/*.ts", "tests/**/*.ts", "prisma/seed.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

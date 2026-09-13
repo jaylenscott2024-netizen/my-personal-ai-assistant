@@ -14,4 +14,12 @@ module.exports = {
     "@typescript-eslint/no-explicit-any": "off",
     "no-console": ["warn", { allow: ["error"] }],
   },
+  overrides: [
+    {
+      // scripts/jarvis-diagnostic.ts is a CLI report — console output is
+      // its entire purpose, not a debugging leftover.
+      files: ["scripts/**/*.ts"],
+      rules: { "no-console": "off" },
+    },
+  ],
 };

@@ -13,14 +13,15 @@
     "copy-native-assets": "mkdir -p dist/eyes/providers/windows && cp src/eyes/providers/windows/eyesWatcher.ps1 dist/eyes/providers/windows/eyesWatcher.ps1",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src tests --ext .ts",
+    "lint": "eslint src tests scripts --ext .ts",
     "pretest": "DATABASE_URL=\"file:$(pwd)/prisma/test.db\" npx prisma migrate deploy",
     "test": "vitest run",
     "test:watch": "vitest",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "diagnostic": "tsx scripts/jarvis-diagnostic.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
