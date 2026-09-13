@@ -131,13 +131,22 @@ export class RealtimeVoiceSession {
 
   private async handleUtterance(audioPcm16: Buffer): Promise<void> {
     this.setState("thinking");
+    // Epoch-ms bounds for the utterance itself, stamped before
+    // transcription so they describe when the user actually spoke rather
+    // than when STT finished. Jarvis Eyes stamps every visual observation
+    // on the same clock (VisualSample.atMs), which is what makes "what was
+    // on screen while I said that?" answerable by intersecting the two
+    // ranges — see EYES.md. Derived from the audio length, so it holds
+    // regardless of how long STT takes.
+    const endedAtMs = Date.now();
+    const startedAtMs = endedAtMs - Math.round((audioPcm16.length / 2 / 16_000) * 1000);
 
     const sttProvider = getVoiceProvider(this.opts.sttProviderId);
     const wav = pcm16ToWav(audioPcm16, 16_000);
     const transcript = await sttProvider.transcribe(wav, "audio/wav", { userId: this.opts.userId });
     const text = transcript.text.trim();
 
-    eventBus.emitEvent("voice.transcript", { text }, this.opts.userId);
+    eventBus.emitEvent("voice.transcript", { text, startedAtMs, endedAtMs }, this.opts.userId);
     this.opts.onTranscript(text);
 
     if (!text) {

@@ -66,10 +66,10 @@ model UserSettings {
   sttProvider   String  @default("elevenlabs")
 
   // Jarvis "Eyes" visual perception (see EYES.md). Off by default —
-  // screen content is sensitive; the user opts in explicitly. No
-  // retention setting exists here because visual data is never
-  // persisted by this version at all (Section: "do not persist visual
-  // data unless explicitly required") — there's nothing to toggle.
+  // screen content is sensitive; the user opts in explicitly. Visual
+  // data is never written to this database at all; the two retention
+  // settings below bound the IN-MEMORY temporal buffer only (Section:
+  // "do not persist visual data unless explicitly required").
   eyesEnabled             Boolean @default(false)
   // structural_only: window/UI-Automation semantic awareness, no pixel
   // capture at all. structural_plus_visual: also allows on-demand,
@@ -89,6 +89,13 @@ model UserSettings {
   // provider, mirroring COMPUTER_COMMAND_ALLOWLIST's empty-by-default
   // pattern.
   eyesAllowedProviders    String  @default("[]")
+  // Bounds on the in-memory temporal visual buffer (VisualHistory): how
+  // far back "what just happened?" can reach, and how many captured
+  // keyframes may be held at once. Both exist so the user controls how
+  // much recent screen activity Jarvis holds in RAM; neither causes any
+  // of it to be written to disk.
+  eyesHistorySeconds      Int     @default(120)
+  eyesMaxKeyframes        Int     @default(12)
 
   updatedAt DateTime @updatedAt
 }

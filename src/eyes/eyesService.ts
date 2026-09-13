@@ -5,7 +5,9 @@ import { prisma } from "../database/client.js";
 import { eventBus } from "../events/eventBus.js";
 import { childLogger } from "../config/logger.js";
 import { NotConfiguredError } from "../utils/errors.js";
-import type { EyesLatencyPolicy } from "../settings/userSettingsService.js";
+import type { EyesLatencyPolicy, UserSettings } from "../settings/userSettingsService.js";
+import { realtimeVisualSessions } from "./transport/realtimeVisualTransport.js";
+import { userIdFromSessionKey } from "./eyesVisionAccess.js";
 
 const log = childLogger("eyes.service");
 
@@ -16,6 +18,8 @@ const log = childLogger("eyes.service");
 // takes effect immediately rather than requiring a restart.
 class EyesService {
   private engines = new Map<string, VisualPerceptionEngine>();
+  private streamUnsubscribeByKey = new Map<string, () => void>();
+  private sessionHookInstalled = false;
 
   async getEngineIfRunning(userId: string): Promise<VisualPerceptionEngine | null> {
     const engine = this.engines.get(userId);
@@ -35,8 +39,10 @@ class EyesService {
       throw new NotConfiguredError("Jarvis Eyes (disabled in settings — enable it first)");
     }
 
+    this.installRealtimeSessionHook();
+
     const provider = await createVisualProvider();
-    const engine = new VisualPerceptionEngine(userId, provider, settings.eyesUpdateLatencyPolicy);
+    const engine = new VisualPerceptionEngine(userId, provider, engineOptionsFor(settings));
     await engine.start();
     this.engines.set(userId, engine);
     eventBus.emitEvent("eyes.started", { platform: provider.platform }, userId);
@@ -48,11 +54,24 @@ class EyesService {
     if (!engine) return;
     await engine.stop();
     this.engines.delete(userId);
+    this.detachStreamsForUser(userId);
     eventBus.emitEvent("eyes.stopped", {}, userId);
   }
 
   async setLatencyPolicy(userId: string, policy: EyesLatencyPolicy): Promise<void> {
     this.engines.get(userId)?.setLatencyPolicy(policy);
+  }
+
+  /** Re-applies every Eyes setting to an already-running engine, so a
+   *  settings change takes effect without a restart (and without losing
+   *  the visual history built up so far). */
+  async applySettings(userId: string, settings: UserSettings): Promise<void> {
+    const engine = this.engines.get(userId);
+    if (!engine) return;
+    const options = engineOptionsFor(settings);
+    engine.setLatencyPolicy(settings.eyesUpdateLatencyPolicy);
+    engine.setKeyframePolicy(options.keyframePolicy ?? {});
+    engine.setHistoryLimits(options.historyLimits ?? {});
   }
 
   /** Called once at server startup (mirrors scheduler.ts's
@@ -76,7 +95,51 @@ class EyesService {
 
   async stopAll(): Promise<void> {
     for (const userId of [...this.engines.keys()]) await this.stop(userId);
+    await realtimeVisualSessions.closeAll();
   }
+
+  // When a live visual session opens for a user, attach that user's stream
+  // to it. This is the only place the engine and the realtime transport
+  // meet, and it's a one-way hand-off: the feed drops frames on its own
+  // schedule and can never apply backpressure to perception.
+  private installRealtimeSessionHook(): void {
+    if (this.sessionHookInstalled) return;
+    this.sessionHookInstalled = true;
+
+    realtimeVisualSessions.onSessionOpened((key, feed) => {
+      const userId = userIdFromSessionKey(key);
+      const engine = this.engines.get(userId);
+      if (!engine) return;
+      this.streamUnsubscribeByKey.get(key)?.();
+      const unsubscribe = engine.subscribe((sample) => {
+        feed.offer(sample); // synchronous, non-blocking, drops when behind
+      });
+      this.streamUnsubscribeByKey.set(key, unsubscribe);
+      log.info({ userId, fps: feed.negotiation.fps }, "attached visual stream to realtime session");
+    });
+  }
+
+  private detachStreamsForUser(userId: string): void {
+    for (const [key, unsubscribe] of [...this.streamUnsubscribeByKey]) {
+      if (userIdFromSessionKey(key) !== userId) continue;
+      unsubscribe();
+      this.streamUnsubscribeByKey.delete(key);
+    }
+  }
+}
+
+/** Translates user-facing settings into engine policy. Keyframe capture is
+ *  enabled only by the explicit structural_plus_visual mode — in the
+ *  default structural_only mode the engine never captures a pixel. */
+function engineOptionsFor(settings: UserSettings) {
+  return {
+    latencyPolicy: settings.eyesUpdateLatencyPolicy,
+    keyframePolicy: { enabled: settings.eyesMode === "structural_plus_visual" },
+    historyLimits: {
+      maxAgeMs: settings.eyesHistorySeconds * 1000,
+      maxFrames: settings.eyesMaxKeyframes,
+    },
+  };
 }
 
 export const eyesService = new EyesService();

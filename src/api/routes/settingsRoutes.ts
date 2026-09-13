@@ -32,6 +32,11 @@ const eyesUpdateSchema = z.object({
   /** AI provider ids allowed to receive ANY visual context — empty by
    *  default, so no provider gets it until explicitly opted in here. */
   eyesAllowedProviders: z.array(z.string()).optional(),
+  /** Bounds on the in-memory temporal visual buffer. Nothing it holds is
+   *  ever written to disk; these control how much recent activity Jarvis
+   *  keeps in RAM. */
+  eyesHistorySeconds: z.number().int().min(5).max(1800).optional(),
+  eyesMaxKeyframes: z.number().int().min(0).max(120).optional(),
 });
 
 // Section 11/12/28/29/87/88: activation, voice, and identity settings are
@@ -98,11 +103,13 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       await eyesService.stop(request.user!.id);
     }
 
-    if (body.eyesUpdateLatencyPolicy) {
-      await eyesService.setLatencyPolicy(request.user!.id, body.eyesUpdateLatencyPolicy);
-    }
+    // Push every Eyes setting into the live engine so changes take effect
+    // immediately, without restarting it (which would throw away the
+    // visual history built up so far).
+    const current = await getUserSettings(request.user!.id);
+    await eyesService.applySettings(request.user!.id, current);
 
-    reply.send(await getUserSettings(request.user!.id));
+    reply.send(current);
   });
 
   app.post("/settings/activation/wake-word-detected", async (request, reply) => {

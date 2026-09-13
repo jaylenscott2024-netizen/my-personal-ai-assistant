@@ -5,9 +5,19 @@ import { disconnectDatabase } from "./database/client.js";
 import { browserManager } from "./browser/browserManager.js";
 import { restoreScheduledJobs } from "./scheduler/scheduler.js";
 import { eyesService } from "./eyes/eyesService.js";
+import { realtimeVisualSessions } from "./eyes/transport/realtimeVisualTransport.js";
+import { geminiLiveSinkFactory } from "./eyes/transport/geminiLiveVisualSink.js";
 
 async function main(): Promise<void> {
   const app = await buildApp();
+
+  // Only offer a live visual transport when a Gemini key actually exists.
+  // Without this the realtime path is simply unavailable and adapters use
+  // the still-image transport — a transport fallback, never a change to
+  // how Jarvis perceives (see EYES.md).
+  if (env.GEMINI_API_KEY) {
+    realtimeVisualSessions.setSinkFactory(geminiLiveSinkFactory);
+  }
 
   const restoredCount = await restoreScheduledJobs();
   logger.info({ restoredCount }, "restored scheduled tasks");

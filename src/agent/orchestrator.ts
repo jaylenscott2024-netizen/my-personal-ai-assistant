@@ -14,6 +14,9 @@ import { audit } from "../security/audit.js";
 import { assembleSystemPrompt } from "../context/instructions.js";
 import { getUserSettings } from "../settings/userSettingsService.js";
 import { getVisualContextForModel } from "../eyes/visualContextAdapter.js";
+import { resolveVisionTransport } from "../eyes/transport/visionTransportRegistry.js";
+import { realtimeSessionKey } from "../eyes/eyesVisionAccess.js";
+import type { VisualContext } from "../eyes/visualContext.js";
 import { retrieveRelevantMemory } from "../memory/memoryService.js";
 import { appendMessage, getHistory } from "../conversation/conversationService.js";
 import { registerCancellation, clearCancellation } from "../tasks/taskService.js";
@@ -154,6 +157,9 @@ async function executeLoop(
 
   let toolCallCount = 0;
   let step = 0;
+  // Visual context produced by a tool on the previous step, waiting to be
+  // carried to the model in whatever shape this provider accepts.
+  let pendingVisualContext: VisualContext | null = null;
 
   for (;;) {
     step++;
@@ -168,7 +174,7 @@ async function executeLoop(
     eventBus.emitEvent("agent.step", { agentRunId, step }, input.userId);
     eventBus.emitEvent("agent.thinking", { agentRunId }, input.userId);
 
-    const request: ChatRequest = {
+    let request: ChatRequest = {
       model: input.model,
       systemPrompt,
       messages,
@@ -176,6 +182,23 @@ async function executeLoop(
       maxOutputTokens: 4096,
       signal,
     };
+
+    // Section 13: the orchestrator stays provider-neutral. It does not know
+    // whether this model takes images, video, or a live stream — it asks
+    // the registry for the transport that fits these capabilities and hands
+    // the provider-neutral visual context over. Adding a provider never
+    // changes this code.
+    if (pendingVisualContext) {
+      const transport = resolveVisionTransport(input.providerId, provider.getCapabilities(input.model));
+      request = await transport.sendVisualContext({
+        visualContext: pendingVisualContext,
+        request,
+        capabilities: provider.getCapabilities(input.model),
+        sessionKey: realtimeSessionKey(input.userId, input.providerId, input.model),
+        signal,
+      });
+      pendingVisualContext = null;
+    }
 
     const response = await getModelResponse(provider, request, {
       stream: Boolean(input.stream),
@@ -240,6 +263,12 @@ async function executeLoop(
         images: vision && providerAllowedForVisual ? outcome.images : undefined,
       };
       messages.push(toolMessage);
+
+      // Same allowlist gate as the ambient summary: a provider the user
+      // hasn't opted in receives no visual context at all, in any form.
+      if (outcome.visualContext && providerAllowedForVisual) {
+        pendingVisualContext = outcome.visualContext;
+      }
       await appendMessage(input.conversationId, "tool", outcome.contentForModel, { toolCallId: call.id });
     }
   }
@@ -253,6 +282,10 @@ interface ToolCallOutcome {
   /** Carried straight from ToolExecutionResult.images — never persisted;
    *  executeLoop decides whether the active model can actually use it. */
   images?: Array<{ mimeType: string; base64: string }>;
+  /** Provider-neutral temporal visual context from an Eyes tool. Routed
+   *  through this provider's vision transport adapter on the next model
+   *  call; never persisted. */
+  visualContext?: VisualContext;
 }
 
 async function executeToolCall(
@@ -337,7 +370,13 @@ async function executeToolCall(
     });
     audit({ userId: input.userId, action: "tool.executed", resource: call.name, outcome: "allowed" });
     eventBus.emitEvent("tool.completed", { agentRunId, toolCallId: record.id, tool: call.name }, input.userId);
-    return { status: "executed", contentForModel: JSON.stringify(result.output), untrusted: result.untrusted, images: result.images };
+    return {
+      status: "executed",
+      contentForModel: JSON.stringify(result.output),
+      untrusted: result.untrusted,
+      images: result.images,
+      visualContext: result.visualContext,
+    };
   } catch (err) {
     const message = (err as Error).message;
     await prisma.toolCallRecord.update({ where: { id: record.id }, data: { status: "failed", error: message, finishedAt: new Date() } });

@@ -1,5 +1,6 @@
 import type { ZodTypeAny } from "zod";
 import type { Permission } from "../security/permissions.js";
+import type { VisualContext } from "../eyes/visualContext.js";
 
 // Section 15: Tool Registry. Every tool — builtin, plugin-provided, or
 // MCP-provided — implements this same shape so the agent orchestrator
@@ -24,6 +25,11 @@ export interface ToolExecutionResult {
    *  never written to persistent conversation history — in-memory for the
    *  current turn only (Section: no visual-data retention by default). */
   images?: Array<{ mimeType: string; base64: string }>;
+  /** Richer, provider-neutral temporal visual context (Eyes tools). The
+   *  orchestrator hands this to the active provider's vision transport
+   *  adapter, which decides how — or whether — it can be carried. Like
+   *  `images`, it never reaches persistent conversation history. */
+  visualContext?: VisualContext;
 }
 
 export interface ToolDefinition<Input = unknown> {

@@ -18,9 +18,23 @@ import {
 import type { VisualProvider } from "../src/eyes/visualProvider.js";
 import type { UIElementNode, VisualEvent, VisualFrame, VisualProviderCapabilities, WindowSummary } from "../src/eyes/types.js";
 
+function makeEvent(overrides: Partial<VisualEvent> = {}): VisualEvent {
+  return {
+    type: "window_focus_changed",
+    at: new Date().toISOString(),
+    attention: "primary",
+    summary: 'Focus moved to "Save" button',
+    window: { windowId: "1", processName: "notepad.exe", title: "Untitled - Notepad", isForeground: true, boundingBox: null },
+    region: null,
+    significance: 0.7,
+    ...overrides,
+  };
+}
+
 class FakeVisualProvider implements VisualProvider {
   readonly platform = "fake";
   private running = false;
+  private onEvent: ((event: VisualEvent) => void) | null = null;
   invoked: string[] = [];
 
   get isRunning() {
@@ -29,8 +43,12 @@ class FakeVisualProvider implements VisualProvider {
   getCapabilities(): VisualProviderCapabilities {
     return { supported: true, windowEvents: true, uiAutomationEvents: true, uiAutomationQueries: true, onDemandFrameCapture: true };
   }
-  async start(_onEvent: (event: VisualEvent) => void): Promise<void> {
+  async start(onEvent: (event: VisualEvent) => void): Promise<void> {
     this.running = true;
+    this.onEvent = onEvent;
+  }
+  emit(event: VisualEvent): void {
+    this.onEvent?.(event);
   }
   async stop(): Promise<void> {
     this.running = false;
@@ -103,17 +121,27 @@ describe("eyes_get_visual_state tool", () => {
     const result = await eyesGetVisualStateTool.execute({ includeVisual: false }, { userId });
     expect(result.images).toBeUndefined();
     expect(result.output).toHaveProperty("windows");
+    // Structural timeline still provided — just with every pixel removed.
+    expect(result.visualContext).toBeDefined();
+    expect(result.visualContext!.samples.every((sample) => sample.frame === null)).toBe(true);
+    expect(result.visualContext!.temporalSummary).toBeTruthy();
   });
 
   it("attaches exactly one on-demand captured frame when includeVisual is true", async () => {
-    __setVisualProviderForTesting(new FakeVisualProvider());
+    const fake = new FakeVisualProvider();
+    __setVisualProviderForTesting(fake);
     const userId = await makeUser();
     await updateUserSettings(userId, { eyesEnabled: true });
-    await eyesService.ensureStarted(userId);
+    const engine = await eyesService.ensureStarted(userId);
+    // The engine only builds context from observations it has actually
+    // made, so give it one real event to observe first.
+    fake.emit(makeEvent());
+    void engine;
 
     const result = await eyesGetVisualStateTool.execute({ includeVisual: true }, { userId });
-    expect(result.images).toHaveLength(1);
-    expect(result.images![0]).toEqual({ mimeType: "image/png", base64: "framedata" });
+    const framed = result.visualContext!.samples.filter((sample) => sample.frame !== null);
+    expect(framed).toHaveLength(1);
+    expect(framed[0].frame).toEqual({ mimeType: "image/png", base64: "framedata", region: null, capturedAt: expect.any(String) });
   });
 });
 

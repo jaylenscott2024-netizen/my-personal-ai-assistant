@@ -28,6 +28,10 @@ export interface UserSettings {
   eyesUpdateLatencyPolicy: EyesLatencyPolicy;
   /** AI provider ids allowed to receive ANY visual context. Empty by default. */
   eyesAllowedProviders: string[];
+  /** How far back the in-memory temporal visual buffer reaches. */
+  eyesHistorySeconds: number;
+  /** How many captured keyframes that buffer may hold at once. */
+  eyesMaxKeyframes: number;
 }
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
@@ -46,6 +50,8 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   eyesAttentionMode: "auto",
   eyesUpdateLatencyPolicy: "balanced",
   eyesAllowedProviders: [],
+  eyesHistorySeconds: 120,
+  eyesMaxKeyframes: 12,
 };
 
 const ACTIVATION_MODES: ActivationMode[] = ["push_to_talk", "wake_word", "clap", "disabled"];
@@ -70,6 +76,8 @@ interface UserSettingsRow {
   eyesAttentionMode: string;
   eyesUpdateLatencyPolicy: string;
   eyesAllowedProviders: string;
+  eyesHistorySeconds: number;
+  eyesMaxKeyframes: number;
 }
 
 function rowToSettings(row: UserSettingsRow): UserSettings {
@@ -97,6 +105,8 @@ function rowToSettings(row: UserSettingsRow): UserSettings {
     eyesAttentionMode: row.eyesAttentionMode as EyesAttentionMode,
     eyesUpdateLatencyPolicy: row.eyesUpdateLatencyPolicy as EyesLatencyPolicy,
     eyesAllowedProviders,
+    eyesHistorySeconds: row.eyesHistorySeconds,
+    eyesMaxKeyframes: row.eyesMaxKeyframes,
   };
 }
 
@@ -126,6 +136,14 @@ export async function updateUserSettings(userId: string, updates: Partial<UserSe
   }
   if (updates.eyesAllowedProviders && !Array.isArray(updates.eyesAllowedProviders)) {
     throw new ValidationError("eyesAllowedProviders must be an array of provider ids.");
+  }
+  // Upper bounds are the point of these settings — an unbounded visual
+  // buffer is exactly the memory-growth failure mode they exist to prevent.
+  if (updates.eyesHistorySeconds !== undefined && (updates.eyesHistorySeconds < 5 || updates.eyesHistorySeconds > 1800)) {
+    throw new ValidationError("eyesHistorySeconds must be between 5 and 1800.");
+  }
+  if (updates.eyesMaxKeyframes !== undefined && (updates.eyesMaxKeyframes < 0 || updates.eyesMaxKeyframes > 120)) {
+    throw new ValidationError("eyesMaxKeyframes must be between 0 and 120.");
   }
 
   const current = await getUserSettings(userId);
