@@ -5,7 +5,7 @@ import { discoverApplications, matchApplications } from "../../computer/appDisco
 import { openApplication, closeApplication } from "../../computer/appLauncher.js";
 import { listWindows, focusWindow } from "../../computer/windowControl.js";
 import { openFile, openFolder, createFolder, moveFile, copyFile, deleteFile } from "../../computer/fileOps.js";
-import { typeText, pressKey, hotkey, click, moveMouse } from "../../computer/inputControl.js";
+import { typeText, pressKey, hotkey, click, doubleClick, scroll, drag, moveMouse } from "../../computer/inputControl.js";
 import { captureScreenshot } from "../../computer/screenshot.js";
 import { runAllowlistedCommand } from "../../computer/commandRunner.js";
 import { currentPlatform } from "../../computer/platform.js";
@@ -247,6 +247,55 @@ export const computerClickTool: ToolDefinition<z.infer<typeof clickInput>> = {
   },
 };
 
+const doubleClickInput = z.object({ x: z.number().int(), y: z.number().int() });
+export const computerDoubleClickTool: ToolDefinition<z.infer<typeof doubleClickInput>> = {
+  name: "computer_double_click",
+  description: "Double-click at a specific screen coordinate.",
+  version: "1.0.0",
+  inputSchema: doubleClickInput,
+  jsonSchema: jsonSchema(doubleClickInput, "computer_double_click"),
+  requiredPermissions: ["computer.input"],
+  requiresApproval: false,
+  source: "builtin",
+  async execute(input) {
+    return { output: await doubleClick(input.x, input.y) };
+  },
+};
+
+const scrollInput = z.object({
+  x: z.number().int(),
+  y: z.number().int(),
+  amount: z.number().describe("Positive scrolls up/away from the user, negative scrolls down — one wheel step is approximately 1.0."),
+});
+export const computerScrollTool: ToolDefinition<z.infer<typeof scrollInput>> = {
+  name: "computer_scroll",
+  description: "Scroll the mouse wheel at a specific screen coordinate.",
+  version: "1.0.0",
+  inputSchema: scrollInput,
+  jsonSchema: jsonSchema(scrollInput, "computer_scroll"),
+  requiredPermissions: ["computer.input"],
+  requiresApproval: false,
+  source: "builtin",
+  async execute(input) {
+    return { output: await scroll(input.x, input.y, input.amount) };
+  },
+};
+
+const dragInput = z.object({ fromX: z.number().int(), fromY: z.number().int(), toX: z.number().int(), toY: z.number().int() });
+export const computerDragTool: ToolDefinition<z.infer<typeof dragInput>> = {
+  name: "computer_drag",
+  description: "Press the left mouse button at one coordinate, move to another, and release — for drag-and-drop, selection, or sliders.",
+  version: "1.0.0",
+  inputSchema: dragInput,
+  jsonSchema: jsonSchema(dragInput, "computer_drag"),
+  requiredPermissions: ["computer.input"],
+  requiresApproval: false,
+  source: "builtin",
+  async execute(input) {
+    return { output: await drag(input.fromX, input.fromY, input.toX, input.toY) };
+  },
+};
+
 const moveMouseInput = z.object({ x: z.number().int(), y: z.number().int() });
 export const computerMoveMouseTool: ToolDefinition<z.infer<typeof moveMouseInput>> = {
   name: "computer_move_mouse",
@@ -328,6 +377,9 @@ export const computerTools: ToolDefinition[] = [
   computerPressKeyTool as ToolDefinition,
   computerHotkeyTool as ToolDefinition,
   computerClickTool as ToolDefinition,
+  computerDoubleClickTool as ToolDefinition,
+  computerScrollTool as ToolDefinition,
+  computerDragTool as ToolDefinition,
   computerMoveMouseTool as ToolDefinition,
   computerScreenshotTool as ToolDefinition,
   computerWaitTool as ToolDefinition,

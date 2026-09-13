@@ -10,6 +10,9 @@ import {
   computerScreenshotTool,
   computerTypeTool,
   computerClickTool,
+  computerDoubleClickTool,
+  computerScrollTool,
+  computerDragTool,
   computerCreateFolderTool,
   computerMoveFileTool,
   computerCopyFileTool,
@@ -25,7 +28,7 @@ import {
 // arbitrary command execution — see security/permissions.ts for why.
 describe("computer tool risk tiers match the spec's own categorization", () => {
   const low = [computerOpenApplicationTool, computerCloseApplicationTool, computerFocusWindowTool, computerListApplicationsTool, computerListWindowsTool, computerOpenFolderTool, computerScreenshotTool];
-  const medium = [computerTypeTool, computerClickTool, computerCreateFolderTool, computerMoveFileTool, computerCopyFileTool];
+  const medium = [computerTypeTool, computerClickTool, computerDoubleClickTool, computerScrollTool, computerDragTool, computerCreateFolderTool, computerMoveFileTool, computerCopyFileTool];
 
   it.each(low)("$name is LOW risk and does not require approval", (tool) => {
     const risk = riskLevelForPermissions(tool.requiredPermissions);

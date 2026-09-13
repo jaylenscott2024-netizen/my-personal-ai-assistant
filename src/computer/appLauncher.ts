@@ -46,8 +46,12 @@ async function launchByTarget(app: DiscoveredApp): Promise<void> {
   if (platform === "windows") {
     // shell:AppsFolder resolves both UWP and classic Win32 AppIDs correctly.
     await execFileAsync("explorer.exe", [`shell:AppsFolder\\${app.launchTarget}`], { timeout: 15_000 }).catch(async () => {
-      // Fallback for entries where AppID is actually a plain executable path.
-      await execFileAsync("powershell.exe", ["-NoProfile", "-Command", `Start-Process '${app.launchTarget}'`], { timeout: 15_000 });
+      // Fallback for entries where AppID is actually a plain executable
+      // path. app.launchTarget is system-derived (discoverApplications),
+      // not directly attacker-controlled, but it is still escaped before
+      // entering a PowerShell string literal as defense in depth.
+      const escaped = app.launchTarget.replace(/'/g, "''");
+      await execFileAsync("powershell.exe", ["-NoProfile", "-Command", `Start-Process '${escaped}'`], { timeout: 15_000 });
     });
     return;
   }
@@ -69,9 +73,16 @@ export async function closeApplication(query: string): Promise<{ closed: boolean
   if (!processNameHint) throw new ValidationError("An application name is required.");
 
   if (platform === "windows") {
+    // processNameHint is a free-form, model-suppliable tool argument, not
+    // a system-derived value — it MUST be escaped before entering a
+    // PowerShell string literal. Without this, a name like
+    // `x' }; Remove-Item -Recurse -Force C:\ ; '` would break out of the
+    // quoted literal and run arbitrary PowerShell, with no approval gate
+    // in the way (computer_close_application is requiresApproval: false).
+    const escaped = processNameHint.replace(/'/g, "''");
     const { stdout } = await execFileAsync(
       "powershell.exe",
-      ["-NoProfile", "-Command", `Get-Process | Where-Object { $_.ProcessName -like '*${processNameHint}*' } | Stop-Process -Force -PassThru | Measure-Object | Select-Object -ExpandProperty Count`],
+      ["-NoProfile", "-Command", `Get-Process | Where-Object { $_.ProcessName -like '*${escaped}*' } | Stop-Process -Force -PassThru | Measure-Object | Select-Object -ExpandProperty Count`],
       { timeout: 15_000 },
     );
     const count = parseInt(stdout.trim(), 10) || 0;

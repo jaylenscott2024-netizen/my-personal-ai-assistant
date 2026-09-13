@@ -54,7 +54,7 @@ mapping):
 | Tier | Tools | Approval required? |
 |---|---|---|
 | **LOW** | list applications/windows, open/close/focus an application, open a file/folder, screenshot | No |
-| **MEDIUM** | type, click, move mouse, press key/hotkey, create/move/copy a file | No |
+| **MEDIUM** | type, click/double-click/scroll/drag, move mouse, press key/hotkey, create/move/copy a file | No |
 | **HIGH** | delete a file | **Yes** |
 | **CRITICAL** | run an allowlisted command | **Yes**, and only if the executable is explicitly allowlisted |
 
@@ -124,18 +124,24 @@ no Windows or macOS host, no GUI. Here's the honest split:
   requirement.
 
 **Known, documented gap:**
-- **Mouse clicks on Windows**: cursor positioning works via
-  `System.Windows.Forms.Cursor`, but the actual click event needs a small
-  native P/Invoke shim (`mouse_event`/`SendInput`) that isn't included —
-  `computer_click` on Windows currently raises `NotConfiguredError`
-  explaining this rather than pretending to click. Movement-only
-  (`computer_move_mouse`) works. Fixing this is a contained addition to
-  `computer/inputControl.ts` for anyone extending this on a real Windows
-  machine.
-- **Mouse control on macOS**: needs Accessibility permission grants and a
-  small native helper beyond what `osascript` alone can do reliably;
-  documented as `NotConfiguredError` rather than a flaky partial
-  implementation.
+- **Mouse click/double-click/scroll/drag on Windows**: implemented via a
+  small `user32!mouse_event` P/Invoke shim embedded directly in the
+  PowerShell command (`computer/inputControl.ts`) — genuine button-down/up
+  and wheel events, not just cursor positioning. This is standards-based,
+  reviewed code that has never run against a real Windows session in this
+  environment (no Windows host here); see the file's own comments for the
+  exact flags used. `computer_move_mouse` (cursor positioning only, no
+  P/Invoke) has always worked the same way.
+- **Mouse drag on macOS**: `osascript`/System Events has no
+  press-move-release primitive, only discrete click/double-click at a
+  point — a real drag needs a native Accessibility-API helper this project
+  doesn't bundle, so `computer_drag` raises `NotConfiguredError` there
+  rather than faking a drag with a plain click. Click, double-click, and
+  scroll all work on macOS via System Events.
+- **Mouse movement/scroll on macOS**: `computer_move_mouse` and
+  `computer_scroll` need Accessibility permission grants and a small
+  native helper beyond what `osascript` alone can do reliably; documented
+  as `NotConfiguredError` rather than a flaky partial implementation.
 
 ## Running this for real on your Windows PC
 

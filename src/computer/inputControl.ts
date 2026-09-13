@@ -81,19 +81,54 @@ function mapMacKeyCode(key: string): number {
   return codes[key.toLowerCase()] ?? 0;
 }
 
+// Windows mouse events, via user32!mouse_event (winuser.h flags below).
+// This is the P/Invoke shim the click()/moveMouse() doc comments used to
+// say was "not included here" — SendKeys/Cursor.Position alone can
+// position the cursor but cannot generate an actual button-down/up or
+// wheel event, so computer_click on Windows previously always threw
+// NotConfiguredError. mouse_event (rather than the newer SendInput) is
+// used because it needs no marshaled struct — a single flat P/Invoke
+// declaration — which keeps this shim as small and reviewable as the
+// action it performs.
+const MOUSEEVENTF_LEFTDOWN = 0x0002;
+const MOUSEEVENTF_LEFTUP = 0x0004;
+const MOUSEEVENTF_RIGHTDOWN = 0x0008;
+const MOUSEEVENTF_RIGHTUP = 0x0010;
+const MOUSEEVENTF_WHEEL = 0x0800;
+const WHEEL_DELTA = 120;
+
+const MOUSE_EVENT_TYPE = `
+Add-Type -TypeDefinition '
+using System;
+using System.Runtime.InteropServices;
+public class JarvisMouse {
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, IntPtr dwExtraInfo);
+}
+' -ErrorAction SilentlyContinue;`.trim();
+
+function moveCursorPs(x: number, y: number): string {
+  return `[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x},${y});`;
+}
+
+function mouseEventPs(flag: number, data = 0): string {
+  return `[JarvisMouse]::mouse_event(${flag}, 0, 0, ${data}, [IntPtr]::Zero);`;
+}
+
+async function runWindowsMouseScript(script: string): Promise<void> {
+  await execFileAsync("powershell.exe", [
+    "-NoProfile",
+    "-Command",
+    `Add-Type -AssemblyName System.Windows.Forms; ${MOUSE_EVENT_TYPE} ${script}`,
+  ]);
+}
+
 export async function click(x: number, y: number, button: "left" | "right" = "left"): Promise<{ x: number; y: number }> {
   const platform = currentPlatform();
   if (platform === "windows") {
-    await execFileAsync("powershell.exe", [
-      "-NoProfile",
-      "-Command",
-      `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x},${y})`,
-    ]);
-    // A full native click requires a small P/Invoke shim; moving the
-    // cursor into place is implemented and verified in code, the click
-    // event itself needs mouse_event/SendInput — see COMPUTER_CONTROL.md
-    // for the documented gap.
-    throw new NotConfiguredError("Mouse click on Windows (cursor positioning works; the click event itself needs a native shim not included here)");
+    const [down, up] = button === "right" ? [MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP] : [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP];
+    await runWindowsMouseScript(moveCursorPs(x, y) + mouseEventPs(down) + mouseEventPs(up));
+    return { x, y };
   }
   if (platform === "macos") {
     await execFileAsync("osascript", ["-e", `tell application "System Events" to ${button === "right" ? "right click" : "click"} at {${x}, ${y}}`]);
@@ -104,13 +139,74 @@ export async function click(x: number, y: number, button: "left" | "right" = "le
   return { x, y };
 }
 
+export async function doubleClick(x: number, y: number): Promise<{ x: number; y: number }> {
+  const platform = currentPlatform();
+  if (platform === "windows") {
+    const clickOnce = mouseEventPs(MOUSEEVENTF_LEFTDOWN) + mouseEventPs(MOUSEEVENTF_LEFTUP);
+    await runWindowsMouseScript(moveCursorPs(x, y) + clickOnce + clickOnce);
+    return { x, y };
+  }
+  if (platform === "macos") {
+    await execFileAsync("osascript", ["-e", `tell application "System Events" to double click at {${x}, ${y}}`]);
+    return { x, y };
+  }
+  requireLinuxXdotool();
+  await execFileAsync("xdotool", ["mousemove", String(x), String(y), "click", "--repeat", "2", "--delay", "50", "1"]);
+  return { x, y };
+}
+
+/** Positive amount scrolls up/away from the user, negative scrolls down —
+ *  matches the sign convention of a physical scroll wheel and of
+ *  MOUSEEVENTF_WHEEL's dwData. */
+export async function scroll(x: number, y: number, amount: number): Promise<{ x: number; y: number; amount: number }> {
+  const platform = currentPlatform();
+  if (platform === "windows") {
+    const delta = Math.round(amount * WHEEL_DELTA);
+    // dwData is declared as uint; a negative delta must be passed as its
+    // 32-bit unsigned representation or PowerShell's numeric conversion
+    // throws rather than wrapping.
+    const unsignedDelta = delta < 0 ? (delta >>> 0) : delta;
+    await runWindowsMouseScript(moveCursorPs(x, y) + mouseEventPs(MOUSEEVENTF_WHEEL, unsignedDelta));
+    return { x, y, amount };
+  }
+  if (platform === "macos") {
+    throw new NotConfiguredError("Mouse scroll on macOS (requires Accessibility permissions + a native automation helper)");
+  }
+  requireLinuxXdotool();
+  // xdotool has no wheel-delta primitive; it simulates a wheel step as a
+  // button click (4 = up, 5 = down), repeated to approximate magnitude.
+  const button = amount >= 0 ? "4" : "5";
+  const steps = Math.max(1, Math.round(Math.abs(amount)));
+  await execFileAsync("xdotool", ["mousemove", String(x), String(y), "click", "--repeat", String(steps), button]);
+  return { x, y, amount };
+}
+
+export async function drag(fromX: number, fromY: number, toX: number, toY: number): Promise<{ from: { x: number; y: number }; to: { x: number; y: number } }> {
+  const platform = currentPlatform();
+  if (platform === "windows") {
+    await runWindowsMouseScript(moveCursorPs(fromX, fromY) + mouseEventPs(MOUSEEVENTF_LEFTDOWN) + moveCursorPs(toX, toY) + mouseEventPs(MOUSEEVENTF_LEFTUP));
+    return { from: { x: fromX, y: fromY }, to: { x: toX, y: toY } };
+  }
+  if (platform === "macos") {
+    // System Events' scripting dictionary has no press-move-release
+    // primitive (only discrete "click"/"double click" at a point), so a
+    // real drag needs a native Accessibility-API helper this project does
+    // not bundle. Reporting that honestly rather than shipping an
+    // AppleScript that merely clicks the start point and calls it a drag.
+    throw new NotConfiguredError("Mouse drag on macOS (requires Accessibility permissions + a native automation helper for press-move-release)");
+  }
+  requireLinuxXdotool();
+  await execFileAsync("xdotool", ["mousemove", String(fromX), String(fromY), "mousedown", "1", "mousemove", String(toX), String(toY), "mouseup", "1"]);
+  return { from: { x: fromX, y: fromY }, to: { x: toX, y: toY } };
+}
+
 export async function moveMouse(x: number, y: number): Promise<{ x: number; y: number }> {
   const platform = currentPlatform();
   if (platform === "windows") {
     await execFileAsync("powershell.exe", [
       "-NoProfile",
       "-Command",
-      `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x},${y})`,
+      `Add-Type -AssemblyName System.Windows.Forms; ${moveCursorPs(x, y)}`,
     ]);
     return { x, y };
   }
