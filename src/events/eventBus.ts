@@ -35,6 +35,9 @@ export const EVENT_TYPES = [
   "voice.stopped",
   "activation.detected",
   "integration.updated",
+  "eyes.event",
+  "eyes.started",
+  "eyes.stopped",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];

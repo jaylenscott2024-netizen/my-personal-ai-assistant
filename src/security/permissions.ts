@@ -35,6 +35,14 @@ export const PERMISSIONS = [
   "computer.files.write",
   "computer.files.delete",
   "computer.execute",
+  // Jarvis Eyes (visual perception — see EYES.md). Split the same way as
+  // computer.* above: structural/semantic awareness (window list, UI
+  // Automation tree, peripheral event summaries — no pixel data) is a
+  // fundamentally different risk than actual screen pixel capture, which
+  // can contain literally anything on the user's screen (passwords in a
+  // password manager window, private messages, financial data).
+  "computer.eyes.read", // structural/semantic visual awareness — LOW
+  "computer.eyes.capture", // on-demand pixel frame capture — HIGH
   "email.read",
   "email.send",
   "calendar.read",
@@ -61,6 +69,10 @@ export function accessLevelOf(permission: Permission): AccessLevel {
   // being literally read-only I/O, so it's scored at the "read" level
   // (see the PERMISSIONS comment above for the full rationale).
   if (permission === "computer.control") return "read";
+  // Screen pixel capture can contain literally anything visible on the
+  // monitor — scored the same as a delete (HIGH), not the plain LOW
+  // "read" default a structural/semantic query gets.
+  if (permission === "computer.eyes.capture") return "delete";
   if (permission.endsWith(".write")) return "write";
   if (permission.endsWith(".delete")) return "delete";
   if (permission.endsWith(".send")) return "send";

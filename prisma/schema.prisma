@@ -65,6 +65,31 @@ model UserSettings {
   voiceModel    String?
   sttProvider   String  @default("elevenlabs")
 
+  // Jarvis "Eyes" visual perception (see EYES.md). Off by default —
+  // screen content is sensitive; the user opts in explicitly. No
+  // retention setting exists here because visual data is never
+  // persisted by this version at all (Section: "do not persist visual
+  // data unless explicitly required") — there's nothing to toggle.
+  eyesEnabled             Boolean @default(false)
+  // structural_only: window/UI-Automation semantic awareness, no pixel
+  // capture at all. structural_plus_visual: also allows on-demand,
+  // attention-triggered frame capture when a vision-capable, allowed
+  // provider needs it (still never periodic).
+  eyesMode                String  @default("structural_only")
+  // auto: AttentionManager may proactively surface significant changes.
+  // manual: visual context is only ever gathered when a tool is
+  // explicitly invoked, nothing ambient.
+  eyesAttentionMode       String  @default("auto")
+  // realtime | balanced | low_power — throttle multiplier applied to
+  // event acceptance in AttentionManager (see attentionManager.ts).
+  eyesUpdateLatencyPolicy String  @default("balanced")
+  // JSON array of AI provider ids (e.g. ["anthropic"]) allowed to
+  // receive ANY visual context, text summaries included. Empty by
+  // default — nothing is shared until the user explicitly allows a
+  // provider, mirroring COMPUTER_COMMAND_ALLOWLIST's empty-by-default
+  // pattern.
+  eyesAllowedProviders    String  @default("[]")
+
   updatedAt DateTime @updatedAt
 }
 
