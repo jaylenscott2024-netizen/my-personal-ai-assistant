@@ -39,7 +39,7 @@ export const twilioIntegration = {
 
   async getCallStatus(callSid: string): Promise<{ status: string; duration: string | null }> {
     const { sid, token } = requireConfig();
-    const res = await request(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Calls/${callSid}.json`, {
+    const res = await request(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Calls/${encodeURIComponent(callSid)}.json`, {
       headers: { authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}` },
     });
     const json = (await res.body.json()) as Record<string, unknown>;

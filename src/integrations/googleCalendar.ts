@@ -75,7 +75,10 @@ export const googleCalendarIntegration = {
   },
 
   async deleteEvent(eventId: string, calendarId = "primary") {
-    await calendarRequest(`/calendars/${encodeURIComponent(calendarId)}/events/${eventId}`, { method: "DELETE" });
+    // eventId was the one identifier in this file NOT encoded, unlike
+    // calendarId right next to it — an unencoded value could otherwise
+    // alter which calendar/event path this DELETE actually targets.
+    await calendarRequest(`/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`, { method: "DELETE" });
     return { deleted: true };
   },
 };

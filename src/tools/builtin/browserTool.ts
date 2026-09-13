@@ -113,10 +113,14 @@ export const browserTool: ToolDefinition<z.infer<typeof inputSchema>> = {
       case "download": {
         if (!input.selector) throw new ValidationError("selector (the element that triggers the download) is required.");
         const [download] = await Promise.all([page.waitForEvent("download", { timeout: 30_000 }), page.click(input.selector)]);
-        const destDir = path.resolve(env.FILESYSTEM_TOOL_ROOT);
-        const destPath = path.join(destDir, download.suggestedFilename());
+        // download.suggestedFilename() comes from the page being browsed —
+        // a Content-Disposition header the site controls, not something
+        // Jarvis said — so it must be treated as untrusted before it
+        // touches the filesystem. See resolveSafeDownloadPath's own doc
+        // comment for what this guards against.
+        const { safeName, destPath } = resolveSafeDownloadPath(env.FILESYSTEM_TOOL_ROOT, download.suggestedFilename());
         await download.saveAs(destPath);
-        return { output: { downloaded: download.suggestedFilename(), savedTo: destPath } };
+        return { output: { downloaded: safeName, savedTo: destPath } };
       }
       case "upload": {
         if (!input.selector || !input.filePath) throw new ValidationError("selector and filePath are required for upload.");
@@ -150,6 +154,37 @@ export const browserTool: ToolDefinition<z.infer<typeof inputSchema>> = {
 // Mutating/interactive actions escalate to browser.interact + approval;
 // everything else (navigation, reading, waiting) stays browser.read.
 const INTERACT_ACTIONS = new Set(["click", "type", "select", "download", "upload"]);
+// A page's suggested download filename is server-controlled input, no
+// different in trust level than any other content that page returns —
+// but unlike page text/DOM content, it flows straight into a filesystem
+// path. Unlike the "upload" case above (which carefully checks the
+// resolved path stays under the workspace root before touching disk),
+// the download path used to join this string straight into destDir with
+// plain path.join, which does NOT stop "../../../etc/cron.d/evil" from
+// escaping destDir the way resolve-plus-boundary-check does. A malicious
+// or compromised page could therefore write a file anywhere this process
+// can write, from nothing more than a normal-looking download link — and
+// no approval gate would have caught it, since browser_download only
+// requires browser.interact, not approval. Exported so this exact
+// sanitization can be unit-tested against real path-traversal payloads
+// without needing a live browser session.
+export function resolveSafeDownloadPath(workspaceRoot: string, suggestedFilename: string): { safeName: string; destPath: string } {
+  const destDir = path.resolve(workspaceRoot);
+  // path.basename discards any directory components regardless of which
+  // separator they use, so "../../etc/passwd" and "..\\..\\evil.txt" both
+  // collapse to their trailing segment.
+  const safeName = path.basename(suggestedFilename);
+  const destPath = path.resolve(destDir, safeName);
+  // Still required even after basename: a suggested filename of exactly
+  // ".." has no separator to strip, so basename leaves it unchanged, and
+  // resolving ".." against destDir yields destDir's own parent — this is
+  // the actual backstop, not a redundant check.
+  if (destPath !== destDir && !destPath.startsWith(destDir + path.sep)) {
+    throw new ValidationError("Refusing to save a download outside the assistant's workspace.");
+  }
+  return { safeName, destPath };
+}
+
 export function browserPermissionFor(action: string): "browser.read" | "browser.interact" {
   return INTERACT_ACTIONS.has(action) ? "browser.interact" : "browser.read";
 }

@@ -42,10 +42,17 @@ export const shopifyIntegration = {
   },
 
   async getInventoryLevels(inventoryItemIds: string[]) {
-    return shopifyRequest(`/inventory_levels.json?inventory_item_ids=${inventoryItemIds.join(",")}`);
+    const ids = inventoryItemIds.map(encodeURIComponent).join(",");
+    return shopifyRequest(`/inventory_levels.json?inventory_item_ids=${ids}`);
   },
 
+  // productId is a free-form, model-supplied string (see
+  // tools/builtin/integrationTools.ts's shopifyWriteInput: z.string() with
+  // no further restriction) — must be encoded before entering the URL
+  // path, the same way this bug was found and fixed in the GitHub
+  // integration's owner/repo. The tool's approval gate doesn't catch a
+  // crafted id smuggling extra path/query structure into the request.
   async updateProduct(productId: string, updates: Record<string, unknown>) {
-    return shopifyRequest(`/products/${productId}.json`, { method: "PUT", body: { product: { id: productId, ...updates } } });
+    return shopifyRequest(`/products/${encodeURIComponent(productId)}.json`, { method: "PUT", body: { product: { id: productId, ...updates } } });
   },
 };
