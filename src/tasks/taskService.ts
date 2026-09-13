@@ -106,6 +106,19 @@ export function clearCancellation(taskId: string): void {
   activeControllers.delete(taskId);
 }
 
+// Generic cancellation by id — the same map backs both Task cancellation
+// (cancelTask below) and AgentRun cancellation (agent/orchestrator.ts
+// registers under the run's own id), since both are just "an id with an
+// AbortController while work is in flight." Used by the realtime voice
+// pipeline for barge-in: interrupting Jarvis mid-response aborts whatever
+// agent run is currently speaking.
+export function abortById(id: string): boolean {
+  const controller = activeControllers.get(id);
+  if (!controller) return false;
+  controller.abort();
+  return true;
+}
+
 export async function cancelTask(userId: string, taskId: string): Promise<void> {
   const task = await getTask(userId, taskId);
   activeControllers.get(task.id)?.abort();

@@ -16,6 +16,7 @@ import { settingsRoutes } from "./api/routes/settingsRoutes.js";
 import { activityRoutes } from "./api/routes/activityRoutes.js";
 import { healthRoutes } from "./api/routes/healthRoutes.js";
 import { realtimeRoute } from "./api/routes/realtimeRoute.js";
+import { realtimeVoiceRoute } from "./api/routes/realtimeVoiceRoute.js";
 import { registerBuiltinTools } from "./tools/builtinIndex.js";
 
 // Section 46/96: the backend is authoritative and framework-agnostic from
@@ -45,6 +46,7 @@ export async function buildApp() {
   await app.register(settingsRoutes);
   await app.register(activityRoutes);
   await app.register(realtimeRoute);
+  await app.register(realtimeVoiceRoute);
 
   return app;
 }

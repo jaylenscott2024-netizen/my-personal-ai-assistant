@@ -34,6 +34,12 @@ export interface RunAgentInput {
    *  unaffected either way — this only changes how the model's own text
    *  reaches listeners. */
   stream?: boolean;
+  /** Fired once the AgentRun row exists, before the loop starts —
+   *  callers that need to cancel a run they don't yet have the id for
+   *  (the realtime voice pipeline, for barge-in) capture it here rather
+   *  than waiting on the run's promise, which doesn't resolve until the
+   *  whole turn completes. */
+  onAgentRunCreated?: (agentRunId: string) => void;
 }
 
 // Consumes either provider.chat() or provider.chatStream() behind one
@@ -99,6 +105,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentOutcome> {
   });
 
   const controller = registerCancellation(agentRun.id);
+  input.onAgentRunCreated?.(agentRun.id);
   eventBus.emitEvent("agent.started", { agentRunId: agentRun.id }, input.userId);
 
   try {
