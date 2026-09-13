@@ -53,17 +53,25 @@ unrelated, earlier "JARVIS" project the user previously had.
    HIGH/CRITICAL risk tier that determines whether it needs approval.
    See COMPUTER_CONTROL.md.
 8. **Jarvis has an Eyes visual-perception subsystem, independent of the
-   selected AI model** — continuous, event-driven awareness of window/
-   focus/UI changes (never a screenshot-polling loop), with peripheral
-   vs. primary attention, throttled updates, and a capability-aware,
-   provider-neutral adapter that decides per-turn whether and how the
-   active AI model receives any of it. Screenshots are NOT the
-   computer-perception mechanism and are NOT used as an automatic
-   fallback — an unsupported platform reports that honestly instead.
-   Distinct from, and complementary to, Windows UI Automation (structured
-   semantic control data) and computer control (actually acting). Fully
-   user-disable-able, off by default, and no AI provider receives any
-   visual data until explicitly allowlisted. See EYES.md.
+   selected AI model** — *Eyes are provider-independent; vision transport
+   is provider-specific.* One continuous, event-driven perception system
+   (never a screenshot-polling loop) maintains live visual state plus a
+   bounded in-memory temporal buffer, with peripheral vs. primary
+   attention and salience-driven throttling. Perception never depends on
+   an LLM request to advance: a slow, failed or absent AI provider cannot
+   stop, slow, or degrade it, and local perception rate is independent of
+   any cloud transport rate. Each provider then receives visual
+   information through its own capability-driven adapter — temporal
+   keyframe sets for OpenAI and Claude, a negotiated realtime/video/image
+   path for Gemini, and a structural text summary for models that cannot
+   see at all. Screenshots are NOT the computer-perception mechanism and
+   are NOT used as an automatic fallback — an unsupported platform reports
+   that honestly instead. Distinct from, and complementary to, Windows UI
+   Automation (structured semantic control data) and computer control
+   (actually acting). Fully user-disable-able, off by default, no visual
+   data persisted, and no AI provider receives any visual context until
+   explicitly allowlisted. Adding a future provider or local vision model
+   means writing one adapter, not changing Eyes. See EYES.md.
 9. **Real integrations, honestly scoped** — GitHub, Shopify, email,
    Google Calendar, and Twilio voice calling are implemented against
    their real APIs; anything not configured reports that plainly rather
@@ -109,14 +117,23 @@ the detailed, per-feature breakdown of exactly what's verified versus not:
 - **Full plugin sandboxing** — the plugin loader dynamically imports local
   ES modules; it does not yet sandbox/containerize third-party code
   (Section 69 flags this as a requirement before running untrusted code).
-- **Jarvis Eyes on macOS/Linux** — the visual-perception engine, attention
-  management, settings, and every tool are real and fully tested; only
-  Windows has a real `VisualProvider` implementation
-  (`WindowsVisualProvider`, standards-based PowerShell/.NET code against
-  Win32 `SetWinEventHook` and UI Automation, **not executed against a
-  real Windows host in this sandbox**). Every other platform reports
-  `NotConfiguredError` honestly rather than falling back to screenshots.
-  See EYES.md.
+- **Jarvis Eyes on macOS/Linux** — the visual-perception engine, temporal
+  buffer, attention management, vision transport adapters, settings, and
+  every tool are real and fully tested; only Windows has a real
+  `VisualProvider` implementation (`WindowsVisualProvider`,
+  standards-based PowerShell/.NET code against Win32 `SetWinEventHook` and
+  UI Automation, **not executed against a real Windows host in this
+  sandbox**). Every other platform reports `NotConfiguredError` honestly
+  rather than falling back to screenshots. See EYES.md.
+- **Gemini Live visual streaming** — negotiation, frame pacing, coalescing,
+  session management and fallback are fully tested against a fake sink, but
+  the Live API client itself has never completed a real session (no API key
+  or outbound access here). It is written to Google's documented Live API
+  message shapes; treat it as reviewed, not verified.
+- **Video upload to Gemini** — the pathway exists and is tested with a fake
+  clip source, but no video encoder ships with this build, so no
+  `VideoClipSource` is registered and the strategy stays unreachable rather
+  than being claimed falsely.
 
 ## Success criteria
 

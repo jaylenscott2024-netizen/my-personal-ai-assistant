@@ -54,7 +54,8 @@ src/
   conversation/  conversation + message persistence
   database/      Prisma client singleton
   events/        typed event bus
-  eyes/          Jarvis Eyes visual-perception engine, attention management, Windows UI Automation/watcher, provider-neutral visual context adapter
+  eyes/          Jarvis Eyes: continuous visual perception engine + stream, bounded temporal visual memory, attention management, Windows UI Automation/watcher
+  eyes/transport/ per-provider vision transport adapters (OpenAI/Anthropic/Gemini + text-only), realtime session negotiation and pacing
   integrations/  GitHub, Shopify, email, Twilio, Google Calendar clients
   mcp/           MCP client manager
   memory/        memory CRUD + relevance-scored retrieval
@@ -164,7 +165,11 @@ change.
   perception; every other platform reports `NotConfiguredError`
   honestly instead of a fake fallback. No AI provider receives any
   visual data until it's added to `eyesAllowedProviders` in the same
-  settings call. See EYES.md.
+  settings call, and no pixels are ever captured unless you also set
+  `eyesMode: "structural_plus_visual"`. `GEMINI_VIDEO_FPS` and
+  `GEMINI_REALTIME_VISUAL_FPS` declare the ceilings for Gemini's visual
+  transports — they bound what the *cloud* receives and have no effect on
+  the local perception rate. See EYES.md.
 
 Anything left unset reports `not_configured` via `/health` and
 `/integrations` rather than silently pretending to work.
@@ -191,7 +196,23 @@ COMPUTER_CONTROL.md/EYES.md for the detailed per-feature breakdown —
 Windows/macOS computer control and any keyboard/mouse/screenshot
 automation are real, standard code paths that this headless Linux
 sandbox can't execute to verify; OAuth consent flows, wake-word DSP, a
-Windows mouse-click native shim, plugin sandboxing, and the entire
-Windows Eyes/UI-Automation watcher process are architected but not fully
-verified in this environment, each for a specific documented reason
-rather than being simply unfinished.
+Windows mouse-click native shim, plugin sandboxing, the entire Windows
+Eyes/UI-Automation watcher process, and the Gemini Live visual sink are
+architected but not fully verified in this environment, each for a
+specific documented reason rather than being simply unfinished.
+
+## Adding a vision-capable AI provider
+
+Two steps, neither of which touches the Eyes engine:
+
+1. Declare `visionCapabilities` on the model's `ModelCapabilities`
+   (`src/ai/types.ts`) — what its API *actually* accepts: images, video,
+   realtime, plus any rate/count ceilings. Never claim a transport the
+   endpoint doesn't serve.
+2. Write a `VisionTransportAdapter` (`src/eyes/transport/*`) that turns a
+   provider-neutral `VisualContext` into that API's request shape, and
+   register it in `visionTransportRegistry.ts`.
+
+A provider with no adapter falls back to the text-only transport (the
+structural summary) rather than borrowing another provider's request
+shape. See EYES.md for the full contract.

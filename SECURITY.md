@@ -173,11 +173,18 @@ Full detail in EYES.md; the security-relevant points:
   in use that turn; a non-vision model simply never receives one, rather
   than receiving unusable data or the request silently degrading in some
   other way.
-- **No retention by default**: `VisualState` lives only in server memory
-  for the life of the process; a captured frame lives only in memory for
-  the current agent turn (`ChatMessage.images`) and is never handed to
-  `conversationService.appendMessage`, so it never enters persisted
-  conversation history.
+- **No retention, verified**: `VisualState` and the bounded in-memory
+  `VisualHistory` live only in server memory and are cleared when the
+  engine stops; a captured frame reaches the model only for the current
+  turn and is never handed to `conversationService.appendMessage`.
+  `tests/eyes.perceptionIndependence.test.ts` captures a frame with a known
+  marker and asserts it appears in no persisted table. The two retention
+  settings (`eyesHistorySeconds`, `eyesMaxKeyframes`) *bound* that
+  in-memory buffer — neither enables writing any of it to disk.
+- **Imagery escalates the permission regardless of age**: asking an Eyes
+  tool for pixels requires `computer.eyes.capture` whether the frame is
+  captured fresh or already held in the buffer — the risk is the model
+  seeing the pixels, not when they were taken.
 - **The user can fully disable Eyes**: `eyesEnabled: false` (the default)
   means the engine never starts and no OS-level event hooks are ever
   registered — not merely "the model is told not to use it."
@@ -186,7 +193,16 @@ Full detail in EYES.md; the security-relevant points:
   `NotConfiguredError` with a specific reason. This is a security
   property as much as an honesty one — a silent fallback to a screenshot
   loop would be a much larger, much less visible attack surface (routine
-  full-screen capture) than the code ever actually implements.
+  full-screen capture) than the code ever actually implements. Note the
+  distinction from *transport* fallback: if Gemini's live visual session
+  can't be opened, the adapter drops to sending still images, which
+  changes how visual context is carried, not how it is perceived.
+- **Capture is attention-gated, not periodic**: keyframes require the
+  opt-in `structural_plus_visual` mode, a salience floor, a rate floor, and
+  no capture already in flight. The default mode captures nothing at all,
+  ever — structural perception needs zero pixels.
+- **Frame payloads are never logged**, including by the Gemini Live sink,
+  which logs only that a socket event occurred.
 
 ## Realtime voice and streaming: no security shortcuts for speed
 

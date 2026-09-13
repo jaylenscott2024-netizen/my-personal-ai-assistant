@@ -149,20 +149,43 @@ renderer-to-native bridge that doesn't exist yet.
 
 ## Jarvis Eyes (visual perception)
 
-See EYES.md for the full picture — summary: a persistent, event-driven
-`VisualPerceptionEngine` (`src/eyes/*`) maintains a continuously-updated
-`VisualState` from real OS events (Win32 `SetWinEventHook` + UI Automation
-event handlers on Windows via a long-lived PowerShell/.NET helper
-process; `UnsupportedVisualProvider` honestly on every other platform) —
-never a screenshot-polling loop. `AttentionManager` scores significance
-and throttles redundant events so the model never gets flooded.
-`VisualContextAdapter` renders an ambient text summary into the system
-prompt, and `eyes_get_visual_state` / `computer_*_ui_*` tools expose it
-on demand — both gated by settings, permissions, and (for any pixel data)
-an explicit per-provider allowlist, entirely independent of which AI
-model is configured. UI Automation (semantic control data — buttons,
-fields, automation ids) is a related but distinct layer from Eyes itself;
-EYES.md explains the difference in full.
+**Eyes are provider-independent; vision transport is provider-specific.**
+See EYES.md for the full picture — summary:
+
+```
+OS events → VisualProvider → AttentionManager → VisualPerceptionEngine
+                                                   │ (implements VisualStream)
+                                    VisualState + bounded VisualHistory
+                                                   │
+                                         VisualContext (purpose-driven)
+                                                   │
+                                        VisionTransportAdapter
+                                 ┌─────────────────┼──────────────────┐
+                              OpenAI           Anthropic           Gemini
+                          temporal images   bookended images   realtime/video/images
+```
+
+`VisualPerceptionEngine` (`src/eyes/*`) is the single continuous source: it
+maintains live `VisualState` from real OS events (Win32 `SetWinEventHook` +
+UI Automation handlers on Windows via a long-lived PowerShell/.NET helper;
+`UnsupportedVisualProvider` honestly elsewhere), records every accepted
+observation into a bounded in-memory `VisualHistory`, and fans samples out
+to subscribers — never a screenshot-polling loop, and never waiting on a
+model. `AttentionManager` scores salience and suppresses redundancy.
+Keyframes are captured only on attention-significant change, only in the
+opt-in `structural_plus_visual` mode, rate-limited and coalesced.
+
+`ModelCapabilities.visionCapabilities` declares what each model's API
+really accepts (images / video / realtime, with rate and count ceilings),
+and `eyes/transport/*` adapters turn one provider-neutral `VisualContext`
+into that provider's own request shape. The orchestrator asks the registry
+for a transport and contains no provider-specific branching. Local
+perception rate is independent of cloud transport rate: the paced realtime
+feed drops and coalesces rather than slowing perception down.
+
+UI Automation (semantic control data — buttons, fields, automation ids) is
+a related but distinct layer from Eyes itself; EYES.md explains the
+difference in full.
 
 ## Data model
 
@@ -192,9 +215,11 @@ See `prisma/schema.prisma` for the full schema. Highlights:
 - `UserSettings` — the assistant's configurable identity (name, default
   "Jarvis"), activation mode and tuning, voice provider/voice/model
   selection, and Jarvis Eyes configuration (enabled flag, mode, attention
-  mode, latency policy, allowed-providers list — see EYES.md). One row
-  per user, replacing what used to be in-memory-only activation config
-  that reset on every restart.
+  mode, latency policy, allowed-providers list, and the two bounds on the
+  in-memory visual buffer — see EYES.md). One row per user, replacing what
+  used to be in-memory-only activation config that reset on every restart.
+  Note what is *not* here: any visual data. Screen observations and
+  keyframes live only in process memory and are never persisted.
 
 ## Event bus and real-time transport
 
@@ -257,7 +282,10 @@ live display server this sandbox lacks), a live ElevenLabs API key's
 actual audio, OAuth consent UI for Google Calendar (uses a pre-obtained
 refresh token instead), wake-word DSP (by design — client-side, per
 Section 87), plugin sandboxing (dynamic import with no process
-isolation yet), and the entire Windows Eyes/UI-Automation watcher process
+isolation yet), the entire Windows Eyes/UI-Automation watcher process
 (standards-based PowerShell/.NET code, unexecuted — no Windows host
-here). See VOICE.md, COMPUTER_CONTROL.md, and EYES.md for the detailed,
+here), and the Gemini Live visual sink (documented Live API message
+shapes, but no API key here so no session has ever completed — the
+negotiation, pacing and fallback around it are fully tested with a fake
+sink). See VOICE.md, COMPUTER_CONTROL.md, and EYES.md for the detailed,
 per-feature breakdown of what's tested versus what needs real hardware.
