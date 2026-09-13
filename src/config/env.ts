@@ -61,10 +61,21 @@ const envSchema = z.object({
   // Filesystem tool sandbox
   FILESYSTEM_TOOL_ROOT: z.string().default("./data/workspace"),
 
+  // Section 8: computer.execute is never bare shell access. Only
+  // executable names in this comma-separated allowlist may ever run,
+  // regardless of what the model requests — empty by default, so an
+  // operator must explicitly opt an executable in.
+  COMPUTER_COMMAND_ALLOWLIST: z.string().default(""),
+
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;
+
+// Exposes the schema's own defaults (e.g. for a test asserting
+// "secure by default" without needing to fight the fact that `env` below
+// is a frozen singleton parsed once at import time).
+export const envSchemaDefaults: AppEnv = envSchema.parse({});
 
 function loadEnv(): AppEnv {
   const parsed = envSchema.safeParse(process.env);

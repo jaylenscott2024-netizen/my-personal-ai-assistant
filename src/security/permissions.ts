@@ -11,14 +11,23 @@ export const PERMISSIONS = [
   // Desktop/computer control (Section 3/8 of the Jarvis computer-control
   // spec). Deliberately split by risk tier rather than one blanket
   // "computer.control" permission, mirroring how filesystem/browser are
-  // already split:
-  //   computer.read     - list apps/windows, read screen/screenshot (LOW)
-  //   computer.control   - open/close/focus an application (MEDIUM)
-  //   computer.input     - keyboard/mouse control (MEDIUM)
-  //   computer.files.*   - desktop file operations, unscoped from the
-  //                        sandboxed filesystem tool's workspace root
-  //   computer.execute   - run an arbitrary shell command (CRITICAL,
-  //                        always allowlisted + approved, never bare)
+  // already split — and matching the spec's own explicit 3-tier
+  // categorization exactly:
+  //   LOW:    computer.read    - list apps/windows, read screen/screenshot
+  //           computer.control - open/close/focus an application, open a
+  //                              file/folder (the spec calls "open
+  //                              application", "focus window", "open
+  //                              folder" LOW risk — launching/focusing
+  //                              something is easily reversible)
+  //   MEDIUM: computer.input      - keyboard/mouse control (type, click)
+  //           computer.files.write - create/move/copy a file
+  //   HIGH:   computer.files.delete - delete a file
+  //   CRITICAL: computer.execute    - run an arbitrary shell command
+  //             (the spec calls this HIGH; treating it as CRITICAL here
+  //             is a deliberately stricter read of "do not simply give
+  //             the LLM unrestricted shell access" — it still gets the
+  //             same approval requirement either way, since both HIGH and
+  //             CRITICAL require approval below)
   "computer.read",
   "computer.control",
   "computer.input",
@@ -47,11 +56,16 @@ export type AccessLevel = "read" | "write" | "execute" | "delete" | "send" | "pu
 // risk-scoring in the approval engine (Section 17/18).
 export function accessLevelOf(permission: Permission): AccessLevel {
   if (permission === "computer.execute") return "admin"; // arbitrary command execution is as risky as admin
+  // computer.control covers launching/closing/focusing an app and
+  // opening a file/folder — the spec's own LOW-risk tier, despite not
+  // being literally read-only I/O, so it's scored at the "read" level
+  // (see the PERMISSIONS comment above for the full rationale).
+  if (permission === "computer.control") return "read";
   if (permission.endsWith(".write")) return "write";
   if (permission.endsWith(".delete")) return "delete";
   if (permission.endsWith(".send")) return "send";
   if (permission === "phone.call") return "call";
-  if (permission === "browser.interact" || permission === "computer.control" || permission === "computer.input") return "execute";
+  if (permission === "browser.interact" || permission === "computer.input") return "execute";
   if (permission === "admin") return "admin";
   return "read"; // covers filesystem.read, browser.read, computer.read, computer.files.read, network.fetch, *.read
 }
