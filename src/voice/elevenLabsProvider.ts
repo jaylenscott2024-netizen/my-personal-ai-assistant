@@ -1,27 +1,39 @@
 import { request } from "undici";
 import { env } from "../config/env.js";
 import { NotConfiguredError, ProviderError } from "../utils/errors.js";
-import type { TranscriptionResult, VoiceInfo, VoiceProvider } from "./types.js";
+import { resolveApiKey } from "./credentialResolution.js";
+import type { SynthesisOptions, TranscribeOptions, TranscriptionResult, VoiceInfo, VoiceProvider } from "./types.js";
 
 const API_BASE = "https://api.elevenlabs.io/v1";
 
-// Section 30: real ElevenLabs integration for TTS + voice listing + STT.
-// Voice selection is always explicit (a `voiceId` argument or the
-// configured default) — never hard-coded to one voice.
+// A low-latency model suited to realtime conversational TTS. Callers can
+// still override via SynthesisOptions.model (Section 2: "configurable
+// model").
+const DEFAULT_TTS_MODEL = "eleven_flash_v2_5";
+
+// Section 2/30: real, first-class ElevenLabs integration — TTS (buffered
+// and streaming), STT, and voice listing, with the API key resolved
+// through the same user-scoped encrypted credential store every other
+// integration uses (falling back to an operator env var), never returned
+// to a caller, never logged, and never handed to the LLM.
 export class ElevenLabsVoiceProvider implements VoiceProvider {
   readonly id = "elevenlabs";
 
-  isConfigured(): boolean {
-    return Boolean(env.ELEVENLABS_API_KEY);
+  async isConfigured(userId?: string): Promise<boolean> {
+    try {
+      await this.resolveKey(userId);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  private requireKey(): string {
-    if (!env.ELEVENLABS_API_KEY) throw new NotConfiguredError("ElevenLabs voice provider (ELEVENLABS_API_KEY)");
-    return env.ELEVENLABS_API_KEY;
+  private async resolveKey(userId?: string): Promise<string> {
+    return resolveApiKey(userId, "elevenlabs", env.ELEVENLABS_API_KEY, "ElevenLabs voice provider (an ELEVENLABS_API_KEY or a saved credential)");
   }
 
-  async listVoices(): Promise<VoiceInfo[]> {
-    const key = this.requireKey();
+  async listVoices(userId?: string): Promise<VoiceInfo[]> {
+    const key = await this.resolveKey(userId);
     const res = await request(`${API_BASE}/voices`, { headers: { "xi-api-key": key } });
     const body = (await res.body.json()) as Record<string, unknown>;
     if (res.statusCode >= 400) throw new ProviderError(`ElevenLabs error (${res.statusCode})`, res.statusCode >= 500);
@@ -32,15 +44,21 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
     }));
   }
 
-  async synthesize(text: string, voiceId?: string): Promise<{ audio: Buffer; mimeType: string }> {
-    const key = this.requireKey();
-    const voice = voiceId ?? env.ELEVENLABS_DEFAULT_VOICE_ID;
-    if (!voice) throw new NotConfiguredError("ElevenLabs default voice (ELEVENLABS_DEFAULT_VOICE_ID or an explicit voiceId)");
+  private async resolveVoiceId(opts?: SynthesisOptions): Promise<string> {
+    if (opts?.voiceId) return opts.voiceId;
+    if (env.ELEVENLABS_DEFAULT_VOICE_ID) return env.ELEVENLABS_DEFAULT_VOICE_ID;
+    throw new NotConfiguredError("ElevenLabs voice (pass voiceId, set a default in Settings, or set ELEVENLABS_DEFAULT_VOICE_ID)");
+  }
+
+  async synthesize(text: string, opts?: SynthesisOptions): Promise<{ audio: Buffer; mimeType: string }> {
+    const key = await this.resolveKey(opts?.userId);
+    const voice = await this.resolveVoiceId(opts);
 
     const res = await request(`${API_BASE}/text-to-speech/${voice}`, {
       method: "POST",
       headers: { "xi-api-key": key, "content-type": "application/json", accept: "audio/mpeg" },
-      body: JSON.stringify({ text, model_id: "eleven_multilingual_v2" }),
+      body: JSON.stringify({ text, model_id: opts?.model ?? DEFAULT_TTS_MODEL }),
+      signal: opts?.signal,
     });
     if (res.statusCode >= 400) {
       const body = await res.body.text();
@@ -51,8 +69,32 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
     return { audio: Buffer.concat(chunks), mimeType: "audio/mpeg" };
   }
 
-  async transcribe(audio: Buffer, mimeType: string): Promise<TranscriptionResult> {
-    const key = this.requireKey();
+  // Real streaming TTS against ElevenLabs' chunked `/stream` endpoint —
+  // audio bytes are yielded as they arrive over the HTTP response rather
+  // than buffered until the full utterance is synthesized. This is what
+  // lets the realtime voice pipeline (voice/realtimeSession.ts) start
+  // playback before ElevenLabs has finished generating the whole reply.
+  async *synthesizeStream(text: string, opts?: SynthesisOptions): AsyncGenerator<Buffer, void, unknown> {
+    const key = await this.resolveKey(opts?.userId);
+    const voice = await this.resolveVoiceId(opts);
+
+    const res = await request(`${API_BASE}/text-to-speech/${voice}/stream`, {
+      method: "POST",
+      headers: { "xi-api-key": key, "content-type": "application/json", accept: "audio/mpeg" },
+      body: JSON.stringify({ text, model_id: opts?.model ?? DEFAULT_TTS_MODEL, optimize_streaming_latency: 3 }),
+      signal: opts?.signal,
+    });
+    if (res.statusCode >= 400) {
+      const body = await res.body.text();
+      throw new ProviderError(`ElevenLabs streaming TTS error (${res.statusCode}): ${body}`, res.statusCode >= 500);
+    }
+    for await (const chunk of res.body) {
+      yield Buffer.from(chunk);
+    }
+  }
+
+  async transcribe(audio: Buffer, mimeType: string, opts?: TranscribeOptions): Promise<TranscriptionResult> {
+    const key = await this.resolveKey(opts?.userId);
     const form = new FormData();
     form.append("model_id", "scribe_v1");
     form.append("file", new Blob([audio], { type: mimeType }), "audio");
@@ -63,6 +105,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
       method: "POST",
       headers: { "xi-api-key": key },
       body: form,
+      signal: opts?.signal,
     });
     const body = (await res.json()) as Record<string, unknown>;
     if (!res.ok) throw new ProviderError(`ElevenLabs STT error (${res.status}): ${JSON.stringify(body)}`, res.status >= 500);
