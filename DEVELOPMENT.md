@@ -42,14 +42,15 @@ All four are green as of this commit.
 ```
 src/
   ai/            provider abstraction, router, retry/backoff, per-provider REST clients
-  agent/         the orchestrator loop
+  agent/         the orchestrator loop (non-streaming and streaming)
   api/           Fastify routes, error handling
   approvals/     approval request lifecycle
   auth/          JWT auth, password hashing, middleware
   activation/    wake-word event handling + real clap-detection DSP
   browser/       Playwright session management
+  computer/      cross-platform computer control (apps, windows, files, input, screenshot, allowlisted commands)
   config/        env validation (zod), logger
-  context/       system-prompt assembly
+  context/       system-prompt assembly (assistant identity lives here)
   conversation/  conversation + message persistence
   database/      Prisma client singleton
   events/        typed event bus
@@ -58,15 +59,21 @@ src/
   memory/        memory CRUD + relevance-scored retrieval
   notifications/ notification delivery
   plugins/       dynamic local plugin loader
-  realtime/      WebSocket gateway
+  realtime/      WebSocket gateway (general activity stream)
   scheduler/     cron-driven scheduled tasks
   security/      permission catalog, credential encryption, audit log
+  settings/      persistent per-user identity/activation/voice settings
   tasks/         task/step state machine
   tools/         tool registry + builtin tools
-  voice/         voice provider abstraction (ElevenLabs, OpenAI Whisper)
+  voice/         VAD, realtime session, activation gate, voice provider abstraction (ElevenLabs, OpenAI Whisper)
 tests/           vitest suite (mirrors src/ layout roughly)
 prisma/          schema + migrations
 ```
+
+See also VOICE.md (realtime speech-to-speech pipeline) and
+COMPUTER_CONTROL.md (cross-platform desktop control) for deep dives into
+those two subsystems, including exactly what's verified in this sandbox
+versus what needs real hardware.
 
 ## Database
 
@@ -141,7 +148,16 @@ change.
   `GOOGLE_REFRESH_TOKEN`.
 - **ElevenLabs**: `ELEVENLABS_API_KEY`, and optionally
   `ELEVENLABS_DEFAULT_VOICE_ID` (list available voices via
-  `GET /voice/providers/elevenlabs/voices`).
+  `GET /voice/providers/elevenlabs/voices`). Prefer configuring it via
+  `POST /integrations/credentials` (user-scoped, encrypted) over the env
+  var for anything beyond a single-operator dev setup — see VOICE.md.
+- **Computer control**: works with zero configuration for the LOW/MEDIUM/
+  HIGH-risk tools. `computer_run_command` additionally requires
+  `COMPUTER_COMMAND_ALLOWLIST` (comma-separated bare executable names) —
+  empty by default, so nothing runs until you explicitly opt executables
+  in. See COMPUTER_CONTROL.md, including how to run the backend on your
+  own Windows/macOS/Linux machine so computer control actually controls
+  *your* desktop.
 
 Anything left unset reports `not_configured` via `/health` and
 `/integrations` rather than silently pretending to work.
@@ -163,6 +179,11 @@ before relying on it in production.
 
 ## Known limitations to design around
 
-See PROJECT_REQUIREMENTS.md's "Explicit non-goals" section — computer
-control, OAuth consent flows, wake-word DSP, and plugin sandboxing are
-architected (permissions, interfaces, config) but not fully implemented.
+See PROJECT_REQUIREMENTS.md's "Explicit non-goals" section, and VOICE.md/
+COMPUTER_CONTROL.md for the detailed per-feature breakdown — Windows/
+macOS computer control and any keyboard/mouse/screenshot automation are
+real, standard code paths that this headless Linux sandbox can't execute
+to verify; OAuth consent flows, wake-word DSP, a Windows mouse-click
+native shim, and plugin sandboxing are architected but not fully
+implemented, each for a specific documented reason rather than being
+simply unfinished.

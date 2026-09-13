@@ -38,33 +38,50 @@ unrelated, earlier "JARVIS" project the user previously had.
 5. **Task engine** — trackable, resumable, cancellable multi-step work
    with an explicit state machine, independent of whether it was
    triggered by a chat message or a schedule.
-6. **Voice as a first-class subsystem** — STT/TTS/speech-to-speech
-   interfaces independent of both the AI model and the activation
-   mechanism (wake word / clap detection), with the client always
-   choosing the mode explicitly.
-7. **Real integrations, honestly scoped** — GitHub, Shopify, email,
+6. **Realtime voice as a first-class subsystem** — a genuine speech-to-
+   speech conversation loop (mic in → VAD → STT → streaming agent →
+   sentence-chunked streaming TTS → audio out, with real barge-in), a
+   first-class ElevenLabs provider resolved through the same encrypted
+   credential store as every other integration, and activation (wake
+   word / clap / push-to-talk) that's independent of both the AI model
+   and the voice provider, with the client always choosing the mode
+   explicitly and never silently always-on. See VOICE.md.
+7. **Cross-platform computer control** — discovery-backed (never
+   hard-coded) application launch/close, window management, real desktop
+   file operations, keyboard/mouse input, screenshots, and an
+   allowlisted command runner, each tagged with the exact LOW/MEDIUM/
+   HIGH/CRITICAL risk tier that determines whether it needs approval.
+   See COMPUTER_CONTROL.md.
+8. **Real integrations, honestly scoped** — GitHub, Shopify, email,
    Google Calendar, and Twilio voice calling are implemented against
    their real APIs; anything not configured reports that plainly rather
    than faking success.
-8. **Security by default** — least-privilege permissions, encrypted
-   credential storage, audit logging, and explicit trust boundaries
-   between system instructions, user instructions, and external content
-   (prompt-injection defense).
-9. **Observability and operability** — structured logs, health checks,
-   an activity/event stream, and a deployment path that isn't tied to one
-   cloud provider.
+9. **Security by default** — least-privilege permissions, encrypted
+   credential storage, audit logging, allowlisted command execution, and
+   explicit trust boundaries between system instructions, user
+   instructions, and external content (prompt-injection defense).
+10. **Observability and operability** — structured logs, health checks,
+    an activity/event stream, streaming API transports (SSE + WebSocket),
+    and a deployment path that isn't tied to one cloud provider.
 
 ## Explicit non-goals (for this iteration)
 
 These are architected for — real interfaces, config validation, and
 honest "not configured" errors exist — but not fully implemented, per the
 project's own "graceful partial implementation" directive rather than
-building fake versions of them:
+building fake versions of them. See VOICE.md and COMPUTER_CONTROL.md for
+the detailed, per-feature breakdown of exactly what's verified versus not:
 
-- **Computer control** (keyboard/mouse/window automation on the host) —
-  a real implementation needs a sandboxed execution target (a VM or
-  dedicated device) that this environment doesn't have; only the
-  permission (`computer.control`) and architectural slot exist.
+- **Windows/macOS computer control, and any keyboard/mouse/screenshot
+  automation** — the code is real and standard for each platform, but
+  this development environment is a headless Linux container: no
+  Windows/macOS host to run the Windows/macOS code paths against, and no
+  display server for keyboard/mouse/screenshot on any platform. Linux
+  application discovery, launch, close, and all file operations *are*
+  verified here against real system calls.
+- **A Windows native mouse-click shim** — cursor positioning works;
+  the click event itself needs a small P/Invoke addition not included
+  (documented in COMPUTER_CONTROL.md).
 - **Browser OAuth consent flows** (Google, Microsoft) — Calendar
   integration uses a pre-obtained refresh token instead of a built-in
   OAuth redirect/consent UI.
@@ -72,7 +89,11 @@ building fake versions of them:
   client/edge detector (Section 87: activation is decoupled from the AI
   model); it does not itself run wake-word audio models. Clap detection,
   by contrast, is fully implemented server-side (real signal processing
-  over PCM audio).
+  over PCM audio) and drives real activation gating.
+- **A Tauri/Electron desktop shell** — this repository is backend-only;
+  computer-control tools act on whichever machine runs the backend
+  process itself. See ARCHITECTURE.md's "Computer control" section for
+  why this is a deliberate choice, not a placeholder.
 - **Full plugin sandboxing** — the plugin loader dynamically imports local
   ES modules; it does not yet sandbox/containerize third-party code
   (Section 69 flags this as a requirement before running untrusted code).

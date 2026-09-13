@@ -44,9 +44,9 @@ Everything below exists to enforce one of those three.
 
 - `security/permissions.ts` defines a fixed catalog of permission strings
   (`filesystem.read/write/delete`, `browser.read/interact`,
-  `computer.control`, `email.read/send`, `calendar.read/write`,
-  `shopify.read/write`, `github.read/write`, `phone.call`,
-  `network.fetch`, `admin`).
+  `computer.read/control/input/files.read/files.write/files.delete/execute`,
+  `email.read/send`, `calendar.read/write`, `shopify.read/write`,
+  `github.read/write`, `phone.call`, `network.fetch`, `admin`).
 - Every tool declares the permissions it needs. Some tools' real risk
   depends on the specific call (`filesystem` read vs. delete, `browser`
   read vs. click/type) — `tools/permissionResolution.ts` computes the
@@ -122,6 +122,51 @@ approval gate as a legitimate request.
   `BrowserContext` — no shared cookies/storage across users or tasks
   (`browser/browserManager.ts`).
 - Idle browser sessions are torn down automatically after 10 minutes.
+
+## Computer-control-specific security
+
+Computer control (`tools/builtin/computerTools.ts`) has the widest reach
+of any tool category in this codebase — real applications, real files
+outside any sandbox root, real keyboard/mouse input — so it gets two
+extra layers beyond the standard permission/approval gate:
+
+- **Risk tiers match the spec's own categorization exactly**
+  (`security/permissions.ts` documents the mapping; verified in
+  `tests/computer.permissionTiers.test.ts`): opening/closing/focusing an
+  app, listing, and screenshots are LOW; typing, clicking, and file
+  creation/move/copy are MEDIUM; file deletion is HIGH (approval
+  required); running a command is scored as CRITICAL — deliberately
+  stricter than the spec's literal "HIGH," since arbitrary command
+  execution is functionally equivalent to admin access.
+- **`computer_run_command` is allowlisted, not just approved**
+  (`computer/commandRunner.ts`): `COMPUTER_COMMAND_ALLOWLIST` names exact,
+  bare executable names an operator has explicitly opted in — empty by
+  default. A path (`/bin/sh`) is rejected even if its basename would
+  otherwise match, and the allowlist check happens independently of, not
+  instead of, the mandatory approval step. Both must pass.
+- **Desktop file operations block a fixed list of OS-critical paths**
+  (`computer/fileOps.ts`) — `/usr`, `/etc`, `C:\Windows`,
+  `C:\Program Files`, `/System`, `/Library`, and similar — rather than
+  restricting to one allowed root, since a real desktop assistant needs
+  to reach the user's actual Downloads/Desktop/Documents folders.
+
+## Realtime voice and streaming: no security shortcuts for speed
+
+Both the SSE streaming conversation endpoint and the realtime voice
+pipeline (`voice/realtimeSession.ts`) call the exact same
+`agent/orchestrator.ts` `runAgent()` function as the standard
+request/response path — streaming only changes how *text* reaches the
+caller (incremental `message.delta` events vs. one final string), not
+whether a tool call still goes through schema validation, permission
+checks, and the approval gate. A voice-triggered "delete that file" still
+pauses for approval exactly like a typed one; the realtime pipeline speaks
+a spoken notice ("I need your approval before I can continue with that")
+rather than silently proceeding or silently failing.
+
+Barge-in (interrupting Jarvis mid-response) only ever cancels *Jarvis's
+own* in-flight work (the current TTS stream and agent run) via
+`tasks/taskService.ts`'s `abortById` — it has no path to skip a pending
+approval or grant one implicitly.
 
 ## Rate limiting and cost control
 

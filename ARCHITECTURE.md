@@ -73,7 +73,12 @@ actually happens on every turn:
    prompt (`context/instructions.ts` — core instructions, safety policy,
    and user preferences are separate sections, not one giant string).
 2. **Model call** — `provider.chat(request)` against the normalized
-   `AIProvider` interface.
+   `AIProvider` interface, or `provider.chatStream(request)` when the
+   caller asked for streaming (`stream: true`) — both paths converge in
+   `getModelResponse()`, so tool handling below never needs to know which
+   one produced the response. Streaming emits `message.delta` events on
+   the event bus as the model generates text; both the SSE conversation
+   endpoint and the realtime voice pipeline consume these the same way.
 3. **Tool calls, if any** — for each requested call:
    a. **Schema validation** (Zod) — a malformed call never reaches a tool.
    b. **Effective-permission resolution** (`tools/permissionResolution.ts`)
@@ -112,6 +117,36 @@ and `ToolCallRecord` rows mean a run's current step, tools used, and
 outcome are queryable independent of the process that's handling it
 (Section 10).
 
+## Realtime voice pipeline
+
+See VOICE.md for the full picture — summary: `/ws/voice` wires a real
+amplitude-envelope VAD (`voice/vad.ts`) to STT, the streaming orchestrator
+above, and sentence-chunked streaming TTS (`voice/realtimeSession.ts`),
+with genuine barge-in (interrupt cancels the in-flight TTS stream *and*
+agent run, not just the audio). Activation (wake word/clap/push-to-talk)
+gates when audio reaches this pipeline at all (`voice/activationGate.ts`)
+and is persisted per-user rather than reset on every restart.
+
+## Computer control
+
+See COMPUTER_CONTROL.md for the full picture — summary:
+`tools/builtin/computerTools.ts` exposes discovery-backed (never
+hard-coded) application launch/close, window management, real desktop
+file operations, keyboard/mouse input, screenshots, and an allowlisted
+command runner, each tagged with the risk tier the spec itself defines.
+
+**Why no separate Tauri/Electron bridge**: this repository has no desktop
+frontend at all. Rather than build one as a prerequisite, computer-control
+tools execute directly in this backend process — so running the backend
+on the machine you want controlled (see COMPUTER_CONTROL.md) is what makes
+"Jarvis, open Blender" real today. If a desktop shell is added later, the
+correct integration is for it to call this backend's API rather than
+executing OS commands itself from a renderer process; the permission/
+approval gate in front of every tool call already provides the security
+boundary Section 9 of the build spec asks a Tauri bridge to provide — it's
+just enforced one layer down, in the backend, rather than in a
+renderer-to-native bridge that doesn't exist yet.
+
 ## Data model
 
 See `prisma/schema.prisma` for the full schema. Highlights:
@@ -137,6 +172,10 @@ See `prisma/schema.prisma` for the full schema. Highlights:
 - `Integration` / `ScheduledTask` / `ActivityEvent` / `Notification` —
   operational state for external services, cron-driven automation, the
   audit/activity stream, and delivered notifications.
+- `UserSettings` — the assistant's configurable identity (name, default
+  "Jarvis"), activation mode and tuning, and voice provider/voice/model
+  selection. One row per user, replacing what used to be in-memory-only
+  activation config that reset on every restart.
 
 ## Event bus and real-time transport
 
@@ -155,8 +194,14 @@ know who emitted an event, only its type. Two consumers exist today:
 
 - **Least privilege**: `security/permissions.ts` defines the permission
   catalog (`filesystem.read/write/delete`, `browser.read/interact`,
-  `email.send`, `shopify.write`, `phone.call`, …); role grants are
-  evaluated per call, not cached per session.
+  `computer.read/control/input/files.*/execute`, `email.send`,
+  `shopify.write`, `phone.call`, …); role grants are evaluated per call,
+  not cached per session.
+- **Allowlisted command execution**: `computer.execute` (running an
+  arbitrary shell command) is gated by both mandatory approval *and* an
+  operator-configured allowlist of bare executable names
+  (`computer/commandRunner.ts`) — empty by default, so nothing runs until
+  explicitly opted in. Neither gate substitutes for the other.
 - **Approval, independent of permission**: holding a permission is
   necessary but not sufficient for a risky action — the approval engine
   gates anything above "read" risk regardless of role, including the
@@ -172,15 +217,26 @@ know who emitted an event, only its type. Two consumers exist today:
 ## What's stubbed vs. real (be honest about this when extending)
 
 Real, working, end-to-end today: auth, conversations, memory, the full
-agent loop (tested with both the mock provider and a live-shaped Anthropic/
-OpenAI/Gemini REST client), tool registry + permission/approval gating,
+agent loop in both non-streaming and streaming modes (tested with the
+mock provider, a runaway-loop test double, and live-shaped Anthropic/
+OpenAI/Gemini REST clients), tool registry + permission/approval gating,
 task state machine, calculator/datetime/filesystem/browser/web-fetch
-tools, GitHub/Shopify/email/Twilio/Google-Calendar clients, MCP client
-connection, plugin loading, cron scheduler, WebSocket activity stream,
-clap detection (real signal processing).
+tools, cross-platform computer-control tools (application discovery/
+launch/close, window management, file operations, input control,
+screenshots, allowlisted command execution), the realtime speech-to-speech
+voice pipeline with genuine barge-in, persistent per-user activation and
+voice settings, GitHub/Shopify/email/Twilio/Google-Calendar clients, MCP
+client connection, plugin loading, cron scheduler, WebSocket activity
+stream + SSE streaming conversation endpoint, clap detection (real signal
+processing).
 
 Architected with real interfaces and honest `NotConfiguredError`s, but
-needing infrastructure this environment doesn't have to go further:
-computer control, OAuth consent UI, wake-word DSP, plugin sandboxing — see
-PROJECT_REQUIREMENTS.md's "Explicit non-goals" for why each one stops
-where it does.
+needing infrastructure this environment doesn't have to fully verify:
+Windows/macOS computer-control commands (correct, standard, unexecuted —
+no such host here), keyboard/mouse/screenshot on any platform (needs a
+live display server this sandbox lacks), a live ElevenLabs API key's
+actual audio, OAuth consent UI for Google Calendar (uses a pre-obtained
+refresh token instead), wake-word DSP (by design — client-side, per
+Section 87), and plugin sandboxing (dynamic import with no process
+isolation yet). See VOICE.md and COMPUTER_CONTROL.md for the detailed,
+per-feature breakdown of what's tested versus what needs real hardware.
