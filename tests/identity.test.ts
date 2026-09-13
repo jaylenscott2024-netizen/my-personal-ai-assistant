@@ -29,10 +29,9 @@ describe("assistant identity", () => {
     expect(instructions).toMatch(/browser/i);
   });
 
-  // Human-like conversational behavior (Phase 3): a strong default
-  // character with no personality sliders, and explicit anti-patterns
-  // (canned enthusiasm, forced filler, claiming to be human) ruled out
-  // rather than left to chance.
+  // Human-like conversational behavior: a consistent underlying character
+  // whose EXPRESSION is dynamic and context-driven, not a fixed checklist
+  // of scripted mannerisms or banned phrases to avoid.
   it("establishes a composed, direct conversational character by default", () => {
     const instructions = coreAssistantInstructions("Jarvis");
     expect(instructions).toMatch(/composed/i);
@@ -40,15 +39,31 @@ describe("assistant identity", () => {
     expect(instructions).toMatch(/confident/i);
   });
 
-  it("explicitly rules out canned acknowledgements and forced filler", () => {
+  it("instructs the assistant to read context rather than follow a fixed script", () => {
     const instructions = coreAssistantInstructions("Jarvis");
-    expect(instructions).toMatch(/great question/i); // named as an example to avoid
-    expect(instructions).toMatch(/filler/i);
+    expect(instructions).toMatch(/adapt|context|situation|moment/i);
+    // Explicitly not a rigid rule list — the identity is stable, the
+    // expression of it is what varies.
+    expect(instructions).not.toMatch(/personality slider/i);
+  });
+
+  it("refuses to suppress or force behavior merely by AI/human association", () => {
+    // The core correction this identity text encodes: don't strip
+    // something because it's "what AI does," don't add something because
+    // it's "what humans do" — decide from the actual situation instead.
+    const instructions = coreAssistantInstructions("Jarvis");
+    expect(instructions).toMatch(/associate.*(ai|human)|stereotyp/i);
+  });
+
+  it("instructs the assistant to carry context forward and incorporate corrections", () => {
+    const instructions = coreAssistantInstructions("Jarvis");
+    expect(instructions).toMatch(/repeat/i);
+    expect(instructions).toMatch(/correct/i);
   });
 
   it("never instructs the assistant to claim it is human", () => {
     const instructions = coreAssistantInstructions("Jarvis");
-    expect(instructions).toMatch(/not a human/i);
+    expect(instructions).toMatch(/never claim to be human/i);
     expect(instructions).not.toMatch(/you are human/i);
   });
 
@@ -57,5 +72,10 @@ describe("assistant identity", () => {
     // complete, not be assembled from user-tunable dials.
     const instructions = coreAssistantInstructions("Jarvis");
     expect(instructions.toLowerCase()).not.toContain("personality slider");
+  });
+
+  it("does not trade adaptation for substance", () => {
+    const instructions = coreAssistantInstructions("Jarvis");
+    expect(instructions).toMatch(/accura|thorough|capab/i);
   });
 });

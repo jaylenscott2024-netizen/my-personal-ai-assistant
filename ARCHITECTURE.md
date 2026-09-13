@@ -72,6 +72,12 @@ actually happens on every turn:
    scored, not "send everything") + tool descriptors + a structured system
    prompt (`context/instructions.ts` — core instructions, safety policy,
    and user preferences are separate sections, not one giant string).
+   Memory here is read-only context; the model's own way to make
+   something persist past this conversation (a stated preference, a
+   correction) is the `memory_remember` tool
+   (`tools/builtin/memoryTools.ts`), which upserts by an optional stable
+   `key` so a later correction replaces the earlier value instead of
+   leaving two memories to contradict each other on retrieval.
 2. **Model call** — `provider.chat(request)` against the normalized
    `AIProvider` interface, or `provider.chatStream(request)` when the
    caller asked for streaming (`stream: true`) — both paths converge in

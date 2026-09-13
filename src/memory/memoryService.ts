@@ -43,6 +43,45 @@ export async function createMemory(input: CreateMemoryInput) {
   });
 }
 
+// Backs the memory_remember tool (tools/builtin/memoryTools.ts) — the
+// model's own way to make something persist past the current
+// conversation, which is what "the user shouldn't have to repeat
+// themselves" and "incorporate a correction" actually require: neither is
+// achievable from prompt instructions alone if there is no way to WRITE
+// memory, only read it.
+//
+// Upserts by (userId, key) when a key is given, rather than always
+// creating a new row. This is specifically what makes correction handling
+// work: telling Jarvis "actually, I prefer email over Slack" after it
+// already remembered "prefers Slack" under the key "contact_preference"
+// replaces that memory instead of leaving two contradictory ones for
+// retrieval to arbitrarily rank against each other. A key is optional —
+// one-off facts with no natural stable identity are simply appended.
+export async function rememberFact(input: CreateMemoryInput): Promise<{ item: Awaited<ReturnType<typeof createMemory>>; replacedExisting: boolean }> {
+  if (!VALID_CATEGORIES.includes(input.category)) {
+    throw new ValidationError(`Invalid memory category "${input.category}".`);
+  }
+  const importance = input.importance ?? 3;
+  if (importance < 1 || importance > 5) {
+    throw new ValidationError("importance must be between 1 and 5.");
+  }
+
+  if (input.key) {
+    const existing = await prisma.memoryItem.findFirst({
+      where: { userId: input.userId, key: input.key, disabled: false },
+    });
+    if (existing) {
+      const item = await prisma.memoryItem.update({
+        where: { id: existing.id },
+        data: { content: input.content, importance, provenance: input.provenance, category: input.category, scope: input.scope },
+      });
+      return { item, replacedExisting: true };
+    }
+  }
+
+  return { item: await createMemory(input), replacedExisting: false };
+}
+
 export async function updateMemory(
   userId: string,
   id: string,

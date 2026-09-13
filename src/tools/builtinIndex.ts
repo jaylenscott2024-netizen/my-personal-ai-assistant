@@ -8,6 +8,7 @@ import { integrationTools } from "./builtin/integrationTools.js";
 import { computerTools } from "./builtin/computerTools.js";
 import { eyesTools } from "./builtin/eyesTools.js";
 import { uiAutomationTools } from "./builtin/uiAutomationTools.js";
+import { memoryTools } from "./builtin/memoryTools.js";
 
 export function registerBuiltinTools(): void {
   for (const tool of [
@@ -20,6 +21,7 @@ export function registerBuiltinTools(): void {
     ...computerTools,
     ...eyesTools,
     ...uiAutomationTools,
+    ...memoryTools,
   ]) {
     toolRegistry.register(tool as never);
   }

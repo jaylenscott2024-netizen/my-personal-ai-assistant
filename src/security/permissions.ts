@@ -43,6 +43,12 @@ export const PERMISSIONS = [
   // password manager window, private messages, financial data).
   "computer.eyes.read", // structural/semantic visual awareness — LOW
   "computer.eyes.capture", // on-demand pixel frame capture — HIGH
+  // Persisting something Jarvis should remember past the current
+  // conversation (a stated preference, a correction, a project fact).
+  // MEDIUM via the standard ".write" suffix rule below — more
+  // consequential than a pure read, but reversible through the existing
+  // memory list/delete API, so it doesn't need approval.
+  "memory.write",
   "email.read",
   "email.send",
   "calendar.read",
