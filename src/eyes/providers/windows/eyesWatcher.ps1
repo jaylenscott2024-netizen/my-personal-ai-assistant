@@ -1,16 +1,16 @@
-# Jarvis Eyes — Windows visual-perception watcher.
+# Jarvis Eyes - Windows visual-perception watcher.
 #
 # UNVERIFIED ON REAL WINDOWS HARDWARE: this script is written against
 # documented, standard Windows APIs, but this project's development
 # environment is a headless Linux container with no Windows host to run
 # PowerShell against. Review it as carefully-reasoned, standards-based
-# code — not as something that has been executed and confirmed working.
+# code - not as something that has been executed and confirmed working.
 # See COMPUTER_CONTROL.md / EYES.md for the full verification status.
 #
 # TWO VERY DIFFERENT RISK TIERS IN THIS FILE, be aware which you're
 # reading:
 #  - The WinEventHook + UI Automation section (below) uses simple, flat
-#    P/Invoke signatures — each a single function call with a handful of
+#    P/Invoke signatures - each a single function call with a handful of
 #    primitive parameters. This is low-risk, common interop, and the kind
 #    of Windows code this project has shipped with confidence throughout.
 #  - The DXGI Desktop Duplication section (search for "CONTINUOUS VISUAL
@@ -29,16 +29,16 @@
 #    solid rather than a best-effort starting point.
 #
 # Architecture: this is a long-lived helper process, not a poll loop, for
-# EVERY capability it exposes — including continuous visual capture:
+# EVERY capability it exposes - including continuous visual capture:
 #  - SetWinEventHook registers OS-level callbacks that fire only when a
 #    real window/foreground/focus event happens; a Win32 message pump
 #    ([System.Windows.Forms.Application]::Run()) is required for those
-#    callbacks to actually be delivered — that pump is what "runs
+#    callbacks to actually be delivered - that pump is what "runs
 #    continuously" here, not a timer re-checking state. UI Automation
 #    event handlers are equally event-driven, delivered by the same pump.
 #  - Continuous visual capture uses DXGI Desktop Duplication's
 #    AcquireNextFrame, which BLOCKS (with a timeout) until the GPU
-#    actually has a new frame — not a `sleep(N); grab pixels` loop. It
+#    actually has a new frame - not a `sleep(N); grab pixels` loop. It
 #    runs on its own dedicated background thread so it can never stall,
 #    or be stalled by, the message-pump thread above.
 #
@@ -50,7 +50,7 @@
 # (unlike the one-shot `execFile` pattern used elsewhere in
 # computer/*.ts, which is fine for infrequent actions but too slow for
 # something meant to feel responsive). Two threads write to stdout (the
-# main message-pump thread, and the capture thread) — `Write-JsonLine`
+# main message-pump thread, and the capture thread) - `Write-JsonLine`
 # below is lock-protected so their output can never interleave into
 # corrupted JSON lines.
 
@@ -111,7 +111,7 @@ Add-Type -TypeDefinition $win32 -Language CSharp
 # =============================================================================
 #
 # See this file's header for the risk-tier warning about this section
-# specifically — it is COM-vtable interop, not the flat P/Invoke used
+# specifically - it is COM-vtable interop, not the flat P/Invoke used
 # above, and is unverified against real hardware.
 #
 # Design choices worth stating explicitly:
@@ -119,13 +119,13 @@ Add-Type -TypeDefinition $win32 -Language CSharp
 #    Windows SDK order (IUnknown's 3 slots are implicit via
 #    InterfaceIsIUnknown; inherited-interface slots come first, then the
 #    interface's own methods, in header order). Getting an order wrong
-#    would silently call the WRONG method at runtime — this is the actual
+#    would silently call the WRONG method at runtime - this is the actual
 #    danger zone.
 #  - Slots this code never calls are declared as trivial zero-argument
 #    placeholders (`UnusedN()`) rather than fully-modeled real signatures.
 #    This is safe specifically BECAUSE they're never invoked: a vtable
 #    slot's declared .NET signature only has to be correct for slots that
-#    are actually called through — earlier/later slots just need to exist
+#    are actually called through - earlier/later slots just need to exist
 #    in the right position to keep everything after them correctly
 #    aligned. Only ~10 methods across all interfaces are actually invoked
 #    and are given complete, real signatures: EnumAdapters1, EnumOutputs,
@@ -135,13 +135,13 @@ Add-Type -TypeDefinition $win32 -Language CSharp
 #    device context directly, so ID3D11Device never needs a
 #    GetImmediateContext call (or its vtable slot) at all.
 #  - Everything reads back through ID3D11DeviceContext.CopyResource into a
-#    CPU-readable STAGING texture, then Map/Unmap — the standard, correct
+#    CPU-readable STAGING texture, then Map/Unmap - the standard, correct
 #    pattern (this is what Microsoft's own Desktop Duplication sample
 #    does). IDXGIOutputDuplication.MapDesktopSurface looks like a
 #    shortcut but is well known to fail on most modern WDDM 2.0 drivers,
 #    so it is deliberately not used here.
 #  - All resource pointers are carried as raw IntPtr end to end (no typed
-#    ID3D11Texture2D/ID3D11Resource wrapper interface exists at all) —
+#    ID3D11Texture2D/ID3D11Resource wrapper interface exists at all) -
 #    CopyResource's parameters are declared as IntPtr, so a raw COM
 #    pointer from CreateTexture2D or QueryInterface can be passed directly.
 #  - Runs on its own dedicated background thread (MTA), separate from the
@@ -153,7 +153,7 @@ Add-Type -TypeDefinition $win32 -Language CSharp
 #  - Never a fallback: if DXGI/D3D11 initialization fails for any reason
 #    (no GPU adapter, an unsupported session, a driver that refuses
 #    duplication), `Start` returns false and the caller reports
-#    continuous capture as unavailable — it never substitutes a
+#    continuous capture as unavailable - it never substitutes a
 #    screenshot-polling loop.
 $dxgiCapture = @"
 using System;
@@ -168,7 +168,7 @@ public static class JarvisEyesCapture
 {
     public static readonly object StdoutLock = new object();
 
-    // ---- Plain DLL exports (function-pointer P/Invoke, NOT vtable calls —
+    // ---- Plain DLL exports (function-pointer P/Invoke, NOT vtable calls -
     // the low-risk kind, same category as the Win32 calls above) ----------
     [DllImport("dxgi.dll")]
     private static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
@@ -233,14 +233,14 @@ public static class JarvisEyesCapture
     // Raised when the duplication object stops being valid: a display mode
     // or resolution change, the secure desktop (UAC prompt / lock screen)
     // taking over, a GPU driver reset, or the session being detached.
-    // Recoverable — the correct response is to rebuild the duplication,
+    // Recoverable - the correct response is to rebuild the duplication,
     // not to give up on Eyes.
     private const int DXGI_ERROR_ACCESS_LOST = unchecked((int)0x887A0026);
     // Another process holds duplication exclusively right now. Also worth
     // retrying: whatever holds it may well release it.
     private const int DXGI_ERROR_SESSION_DISCONNECTED = unchecked((int)0x887A0028);
 
-    // IDXGIFactory1 — need EnumAdapters1 at absolute vtable slot 7
+    // IDXGIFactory1 - need EnumAdapters1 at absolute vtable slot 7
     // (IDXGIObject: 0-3, IDXGIFactory: EnumAdapters=4, MakeWindowAssociation=5,
     // GetWindowAssociation=6 ... wait, need CreateSwapChain=7,
     // CreateSoftwareAdapter=8 too before EnumAdapters1=9, IsCurrent=10).
@@ -277,7 +277,7 @@ public static class JarvisEyesCapture
     private interface IDXGIOutput1
     {
         void Unused0(); void Unused1(); void Unused2(); void Unused3(); // IDXGIObject
-        int GetDesc(out DXGI_OUTPUT_DESC pDesc); // slot 4 — real desktop dimensions, NOT assumed; returns HRESULT
+        int GetDesc(out DXGI_OUTPUT_DESC pDesc); // slot 4 - real desktop dimensions, NOT assumed; returns HRESULT
         void Unused5(); void Unused6(); void Unused7(); void Unused8(); void Unused9(); // rest of IDXGIOutput
         void Unused10(); void Unused11(); void Unused12(); void Unused13(); void Unused14(); void Unused15();
         void Unused16(); void Unused17(); void Unused18(); // IDXGIOutput1's own GetDisplayModeList1/FindClosestMatchingMode1/GetDisplaySurfaceData1
@@ -293,7 +293,7 @@ public static class JarvisEyesCapture
         int GetFrameDirtyRects(uint DirtyRectsBufferSize, [Out] RECT[] pDirtyRectsBuffer, out uint pDirtyRectsBufferSizeRequired); // slot 6
         void UnusedGetFrameMoveRects(); // slot 7
         void UnusedGetFramePointerShape(); // slot 8
-        void UnusedMapDesktopSurface(); // slot 9 — deliberately unused; see file header
+        void UnusedMapDesktopSurface(); // slot 9 - deliberately unused; see file header
         void UnusedUnMapDesktopSurface(); // slot 10
         int ReleaseFrame(); // slot 11
     }
@@ -332,7 +332,7 @@ public static class JarvisEyesCapture
     private static int _reconnects;
 
     /** Status/lifecycle message for the Node side. Without this the engine
-     *  cannot tell a live stream from one that died mid-session — it would
+     *  cannot tell a live stream from one that died mid-session - it would
      *  keep reporting Eyes as capturing long after the duplication handle
      *  went bad. */
     private static void EmitCaptureStatus(string state, string detail)
@@ -383,7 +383,7 @@ public static class JarvisEyesCapture
             {
                 // Outer reconnect loop. A duplication session can be
                 // invalidated by things that are entirely normal on a
-                // desktop — changing resolution, a UAC prompt, locking the
+                // desktop - changing resolution, a UAC prompt, locking the
                 // screen, a GPU driver reset, plugging in a monitor. None
                 // of those should end Jarvis's vision permanently, so the
                 // loop rebuilds duplication (re-reading desktop dimensions,
@@ -466,12 +466,12 @@ public static class JarvisEyesCapture
             if (hr < 0) throw new InvalidOperationException("CreateDXGIFactory1 failed: 0x" + hr.ToString("X8"));
             var factory = (IDXGIFactory1)Marshal.GetTypedObjectForIUnknown(factoryPtr, typeof(IDXGIFactory1));
 
-            hr = factory.EnumAdapters1((uint)0, out adapterPtr); // TODO: adapter selection for true multi-GPU setups is not implemented — primary adapter only
+            hr = factory.EnumAdapters1((uint)0, out adapterPtr); // TODO: adapter selection for true multi-GPU setups is not implemented - primary adapter only
             if (hr < 0) throw new InvalidOperationException("EnumAdapters1 failed: 0x" + hr.ToString("X8"));
             var adapter = (IDXGIAdapter1)Marshal.GetTypedObjectForIUnknown(adapterPtr, typeof(IDXGIAdapter1));
 
             hr = adapter.EnumOutputs((uint)Math.Max(0, displayIndex), out outputPtr);
-            if (hr < 0) throw new InvalidOperationException("EnumOutputs(" + displayIndex + ") failed: 0x" + hr.ToString("X8") + " — display index may not exist");
+            if (hr < 0) throw new InvalidOperationException("EnumOutputs(" + displayIndex + ") failed: 0x" + hr.ToString("X8") + " - display index may not exist");
 
             var output1Iid = IID_IDXGIOutput1;
             hr = Marshal.QueryInterface(outputPtr, ref output1Iid, out output1Ptr);
@@ -485,10 +485,10 @@ public static class JarvisEyesCapture
             context = Marshal.GetTypedObjectForIUnknown(contextPtr, typeof(ID3D11DeviceContext));
 
             hr = output1.DuplicateOutput(devicePtr, out dupPtr);
-            if (hr < 0) throw new InvalidOperationException("DuplicateOutput failed: 0x" + hr.ToString("X8") + " — often means no GPU adapter, a remote/console session without duplication support, or another process already holding exclusive duplication");
+            if (hr < 0) throw new InvalidOperationException("DuplicateOutput failed: 0x" + hr.ToString("X8") + " - often means no GPU adapter, a remote/console session without duplication support, or another process already holding exclusive duplication");
             duplication = Marshal.GetTypedObjectForIUnknown(dupPtr, typeof(IDXGIOutputDuplication));
 
-            // Real desktop dimensions — required for the staging texture to
+            // Real desktop dimensions - required for the staging texture to
             // match the duplicated resource's actual size. Getting this
             // wrong (e.g. an assumed/hard-coded resolution) would make
             // every CopyResource call below operate on mismatched-size
@@ -569,7 +569,7 @@ public static class JarvisEyesCapture
 
             if (hr < 0)
             {
-                // Genuinely unexpected. Report it rather than dying mutely —
+                // Genuinely unexpected. Report it rather than dying mutely -
                 // the Node side marks capture inactive on this message
                 // instead of believing a dead stream is still running.
                 EmitCaptureStatus("failed", "AcquireNextFrame failed: 0x" + hr.ToString("X8"));
@@ -585,7 +585,7 @@ public static class JarvisEyesCapture
                 int dirtyCount = dirtyHr >= 0 ? (int)(dirtyNeeded / Marshal.SizeOf(typeof(RECT))) : 0;
 
                 long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                double changeScore = Math.Min(1.0, dirtyCount / 8.0); // coarse coverage proxy — see file note above on real dirty-rect area
+                double changeScore = Math.Min(1.0, dirtyCount / 8.0); // coarse coverage proxy - see file note above on real dirty-rect area
                 bool dueByRate = (nowMs - lastMaterializedMs) >= minMaterializeIntervalMs;
                 bool dueBySignificance = changeScore >= 0.6;
                 bool materialize = dirtyCount > 0 && (dueByRate || dueBySignificance);
@@ -616,7 +616,7 @@ public static class JarvisEyesCapture
                 json.Append(",\"displayId\":\"").Append(displayIndex).Append("\"");
                 json.Append(",\"width\":").Append(width).Append(",\"height\":").Append(height);
                 // InvariantCulture matters here: on a machine whose locale
-                // uses a comma decimal separator (de-DE, fr-FR, …) the
+                // uses a comma decimal separator (de-DE, fr-FR, ...) the
                 // default ToString would emit 0,75 and produce invalid JSON
                 // that breaks the whole newline-JSON protocol.
                 json.Append(",\"changeScore\":").Append(changeScore.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
@@ -668,7 +668,7 @@ public static class JarvisEyesCapture
             {
                 IntPtr srcRow = IntPtr.Add(mapped.pData, y * (int)mapped.RowPitch);
                 IntPtr dstRow = IntPtr.Add(bmpData.Scan0, y * bmpData.Stride);
-                // Copy via an intermediate managed buffer — Windows has no
+                // Copy via an intermediate managed buffer - Windows has no
                 // direct pointer-to-pointer RtlMoveMemory P/Invoke declared
                 // here, and this keeps the copy allocation-bounded per row.
                 byte[] rowBuf = new byte[Math.Min((int)mapped.RowPitch, bmpData.Stride)];
@@ -685,7 +685,7 @@ public static class JarvisEyesCapture
         {
             var jpegCodec = GetJpegCodec();
             var encParams = new EncoderParameters(1);
-            encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 65L); // bounded size over fidelity — this is local memory, not a permanent record
+            encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 65L); // bounded size over fidelity - this is local memory, not a permanent record
             if (jpegCodec != null) bmp.Save(ms, jpegCodec, encParams);
             else bmp.Save(ms, ImageFormat.Jpeg);
             bmp.Dispose();
@@ -846,7 +846,7 @@ function Handle-Command($cmd) {
             }
             "get_ui_element" {
                 $el = $script:elementRefs[$cmd.elementRef]
-                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired — re-query first)." }
+                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired - re-query first)." }
                 # Depth 0: the caller already has this element's subtree from
                 # whichever getUiTree/findUiElement call produced the ref;
                 # this re-resolves just the element's own current
@@ -856,7 +856,7 @@ function Handle-Command($cmd) {
             }
             "invoke_ui_element" {
                 $el = $script:elementRefs[$cmd.elementRef]
-                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired — re-query first)." }
+                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired - re-query first)." }
                 $pattern = $null
                 if ($el.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
                     $pattern.Invoke()
@@ -871,7 +871,7 @@ function Handle-Command($cmd) {
             }
             "set_ui_value" {
                 $el = $script:elementRefs[$cmd.elementRef]
-                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired — re-query first)." }
+                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired - re-query first)." }
                 $pattern = $null
                 if (-not $el.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
                     throw "Element does not support the Value pattern."
@@ -881,16 +881,16 @@ function Handle-Command($cmd) {
             }
             "focus_ui_element" {
                 $el = $script:elementRefs[$cmd.elementRef]
-                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired — re-query first)." }
+                if (-not $el) { throw "Unknown elementRef (tree/query result may have expired - re-query first)." }
                 $el.SetFocus()
                 return @{ id = $cmd.id; kind = "response"; ok = $true; data = @{ focused = $true } }
             }
             "capture_frame" {
-                # On-demand only — invoked exclusively in response to an
+                # On-demand only - invoked exclusively in response to an
                 # explicit request from the engine's AttentionManager or a
                 # tool call, never on a timer. Uses GDI screen copy scoped
                 # to the requested region (or the foreground window if
-                # none given) — the same primitive as computer/screenshot.ts
+                # none given) - the same primitive as computer/screenshot.ts
                 # but gated entirely differently: attention-triggered, not
                 # polled, and only ever reachable through the Eyes
                 # permission/allowlist gate.
@@ -920,7 +920,7 @@ function Handle-Command($cmd) {
                 $processingFps = if ($cmd.processingFps) { [int]$cmd.processingFps } else { 2 }
                 $maxBufferedFrames = if ($cmd.maxBufferedFrames) { [int]$cmd.maxBufferedFrames } else { 90 }
                 # Throws with a specific, actionable message on failure
-                # (no GPU adapter, unsupported session, etc.) — the caller
+                # (no GPU adapter, unsupported session, etc.) - the caller
                 # (Handle-Command's own try/catch) turns that into an
                 # honest ok:$false response rather than a fake success.
                 [JarvisEyesCapture]::Start($displayIndex, $captureFps, $processingFps, $maxBufferedFrames) | Out-Null
@@ -989,11 +989,11 @@ Write-JsonLine @{ kind = "ready" }
 # --- Main loop: pump Win32 messages (delivers WinEventHook callbacks) while
 # also reading one-shot commands from stdin. Commands are read via a
 # System.Windows.Forms.Timer tick on this same thread rather than a
-# background thread, because UI Automation is STA/COM-affine — a second
+# background thread, because UI Automation is STA/COM-affine - a second
 # thread calling into AutomationElement would risk cross-thread COM
 # failures. The timer tick is not "polling" in the sense this project
 # avoids elsewhere: it drains whatever command lines are already buffered
-# on stdin (non-blocking `Peek()`) — the actual events this whole script
+# on stdin (non-blocking `Peek()`) - the actual events this whole script
 # exists to observe (window/focus/structure changes) still arrive purely
 # via the WinEventHook/UI-Automation callbacks above, not this timer.
 $timer = New-Object System.Windows.Forms.Timer
