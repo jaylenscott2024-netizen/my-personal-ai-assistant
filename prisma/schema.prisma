@@ -100,7 +100,7 @@ model UserSettings {
   // provider's transport rate — see EYES.md. 60 is the documented
   // ceiling, never assumed reachable; the platform capture loop adapts
   // down to whatever the display/hardware actually sustains.
-  eyesLocalCaptureFps     Int     @default(10)
+  eyesLocalCaptureFps     Int?    // null = auto-measured sustainable rate
   eyesLocalProcessingFps  Int     @default(2)
   eyesMaxBufferedFrames   Int     @default(90)
 

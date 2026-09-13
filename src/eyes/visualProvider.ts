@@ -82,4 +82,20 @@ export interface VisualProvider {
    *  wearing this method's name. */
   startContinuousCapture(options: ContinuousCaptureOptions, onFrame: (frame: ContinuousFrameSample) => void): Promise<void>;
   stopContinuousCapture(): Promise<void>;
+
+  /** Optional lifecycle signal for the capture stream. Without it, a
+   *  stream that dies mid-session (display mode change, GPU driver reset,
+   *  the secure desktop taking over) is indistinguishable from a
+   *  motionless desktop: both are simply silence. Providers that can tell
+   *  the difference report it here so the engine stops claiming Eyes are
+   *  capturing when they are not, and can see recovery when it happens.
+   *  Optional because not every platform can distinguish the two. */
+  onCaptureStatus?(listener: (state: CaptureStreamState, detail: string) => void): void;
 }
+
+/** Lifecycle of the platform's continuous capture stream.
+ *  - capturing: live and delivering
+ *  - reinitializing / reconnecting: recoverable interruption, rebuilding
+ *  - failed: unrecoverable for this session
+ *  - stopped: ended normally */
+export type CaptureStreamState = "capturing" | "reinitializing" | "reconnecting" | "failed" | "stopped";

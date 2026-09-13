@@ -45,11 +45,21 @@ export interface UserSettings {
   eyesHistorySeconds: number;
   /** How many captured keyframes that buffer may hold at once. */
   eyesMaxKeyframes: number;
-  /** Requested native continuous-capture rate (frames/sec) — the "local
-   *  Eyes FPS." Independent of any AI provider's transport rate; up to
-   *  60fps where the display/hardware actually supports it. Only takes
-   *  effect when eyesMode is "structural_plus_visual". */
-  eyesLocalCaptureFps: number;
+  /** Native continuous-capture rate (frames/sec) — the "local Eyes FPS,"
+   *  independent of any AI provider's transport rate.
+   *
+   *  NULL (the default) means AUTO: Jarvis measures what this specific
+   *  machine can actually sustain and adapts, rather than making the user
+   *  guess a number. See eyes/captureCapability.ts — the estimate comes
+   *  from the real capture pipeline, not from the monitor's refresh rate
+   *  or the GPU's spec sheet.
+   *
+   *  A number here is an explicit manual override for users who want to
+   *  cap Eyes deliberately (e.g. to leave GPU headroom for a game). There
+   *  is no product-imposed ceiling: the bound is a sanity limit, not an
+   *  opinion about how fast Eyes are allowed to be. Only takes effect
+   *  when eyesMode is "structural_plus_visual". */
+  eyesLocalCaptureFps: number | null;
   /** How often a captured tick is worth fully materializing into a
    *  pixel-bearing observation versus change-metadata only. Bounds local
    *  CPU/memory cost of encoding, independent of eyesLocalCaptureFps. */
@@ -77,7 +87,7 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   eyesAllowedProviders: [],
   eyesHistorySeconds: 120,
   eyesMaxKeyframes: 12,
-  eyesLocalCaptureFps: 10,
+  eyesLocalCaptureFps: null, // auto — measured, not guessed
   eyesLocalProcessingFps: 2,
   eyesMaxBufferedFrames: 90,
 };
@@ -106,7 +116,7 @@ interface UserSettingsRow {
   eyesAllowedProviders: string;
   eyesHistorySeconds: number;
   eyesMaxKeyframes: number;
-  eyesLocalCaptureFps: number;
+  eyesLocalCaptureFps: number | null;
   eyesLocalProcessingFps: number;
   eyesMaxBufferedFrames: number;
 }
@@ -182,8 +192,14 @@ export async function updateUserSettings(userId: string, updates: Partial<UserSe
   // 60fps is the documented ceiling — "up to the requested rate," never a
   // hard-coded assumption that hardware can sustain it; the platform
   // capture loop is what actually adapts down if it can't.
-  if (updates.eyesLocalCaptureFps !== undefined && (updates.eyesLocalCaptureFps < 1 || updates.eyesLocalCaptureFps > 60)) {
-    throw new ValidationError("eyesLocalCaptureFps must be between 1 and 60.");
+  // Null is explicitly allowed and is the default: it means "measure it."
+  // The upper bound is a sanity limit to stop a nonsense value reaching the
+  // capture loop, NOT a cap on how fast Eyes may run — a machine that can
+  // sustain 240fps is permitted to.
+  if (updates.eyesLocalCaptureFps !== undefined && updates.eyesLocalCaptureFps !== null) {
+    if (updates.eyesLocalCaptureFps < 1 || updates.eyesLocalCaptureFps > 480) {
+      throw new ValidationError("eyesLocalCaptureFps must be between 1 and 480, or null for automatic measurement.");
+    }
   }
   if (updates.eyesLocalProcessingFps !== undefined && (updates.eyesLocalProcessingFps < 1 || updates.eyesLocalProcessingFps > 60)) {
     throw new ValidationError("eyesLocalProcessingFps must be between 1 and 60.");

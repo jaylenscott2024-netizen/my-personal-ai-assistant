@@ -146,6 +146,20 @@ export interface ContinuousFrameSample {
    *  scoring in the engine turns into attention/significance. */
   changeScore: number;
   frame: VisualFrame | null;
+  /** Acquire attempts since the previous delivered tick that returned
+   *  "nothing new" (e.g. DXGI_ERROR_WAIT_TIMEOUT). This is what separates
+   *  a MOTIONLESS DESKTOP from a pipeline that cannot keep up — without
+   *  it, a static screen looks identical to an overloaded machine and the
+   *  capability estimator would wrongly ratchet the capture rate down to
+   *  nothing. See eyes/captureCapability.ts. Absent on sources that can't
+   *  distinguish the two. */
+  idleTimeouts?: number;
+  /** Frames the capture source had available but discarded because the
+   *  pipeline was still busy — the genuine "falling behind" signal. */
+  dropped?: number;
+  /** Time from the frame becoming available to it being handed over, in
+   *  ms. Feeds latency diagnostics, not retention decisions. */
+  captureLatencyMs?: number;
 }
 
 // The Eyes Engine's continuously-maintained understanding of the visual

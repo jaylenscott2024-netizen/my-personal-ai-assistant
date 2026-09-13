@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { AttentionManager, type LatencyPolicy } from "./attentionManager.js";
-import type { VisualProvider } from "./visualProvider.js";
+import type { CaptureStreamState, VisualProvider } from "./visualProvider.js";
 import type {
   ContinuousFrameSample,
   ScreenRegion,
@@ -14,6 +14,7 @@ import type {
 import { changeKindForEvent, type VisualSample, type VisualSampleListener, type VisualStream } from "./visualStream.js";
 import { DEFAULT_VISUAL_HISTORY_LIMITS, VisualHistory, type VisualHistoryLimits, type VisualHistoryQuery } from "./visualHistory.js";
 import { buildVisualContext, type VisualContext, type VisualContextRequest } from "./visualContext.js";
+import { CaptureCapabilityEstimator, type CaptureWindowVerdict } from "./captureCapability.js";
 import { eventBus } from "../events/eventBus.js";
 import { childLogger } from "../config/logger.js";
 
@@ -36,11 +37,16 @@ export interface ContinuousCapturePolicy {
    *  never starts the continuous capture stream — perception is purely
    *  structural, and zero pixels are ever obtained. */
   enabled: boolean;
-  /** Requested native capture rate (frames/sec) — independent of, and
-   *  normally much higher than, processingFps. Up to 60fps where the
-   *  display/hardware actually supports it; the platform capture loop
-   *  adapts down rather than forcing an unreachable rate. */
-  captureFps: number;
+  /** Native capture rate (frames/sec) — independent of, and normally much
+   *  higher than, processingFps, and entirely independent of any AI
+   *  provider's transport rate.
+   *
+   *  NULL means AUTO: the engine measures what this machine can actually
+   *  sustain (captureCapability.ts) and adapts, instead of committing to a
+   *  number nobody has verified. A number is an explicit manual override.
+   *  There is no fixed ceiling here by design — a machine that sustains
+   *  144 or 240 is allowed to run at 144 or 240. */
+  captureFps: number | null;
   /** How often a tick is worth fully materializing into a pixel-bearing
    *  VisualSample versus retained as change-metadata only. Bounds local
    *  CPU/memory cost of decoding/encoding, independent of captureFps. */
@@ -52,10 +58,47 @@ export interface ContinuousCapturePolicy {
 
 export const DEFAULT_CONTINUOUS_CAPTURE_POLICY: ContinuousCapturePolicy = {
   enabled: false,
-  captureFps: 10,
+  captureFps: null, // auto: measured on the real pipeline, never assumed
   processingFps: 2,
   maxBufferedFrames: 90,
 };
+
+/** How long each capture-capability measurement window runs before the
+ *  estimator judges it. Long enough that a brief hitch doesn't read as a
+ *  capability limit, short enough to adapt within a few seconds of a real
+ *  change (a game launching, a display switching mode). */
+const CAPABILITY_WINDOW_MS = 2_000;
+
+/** Phase 10 diagnostics. Counters and rates only — never pixels, window
+ *  titles, or anything else derived from screen contents, so this is safe
+ *  to log and to expose. */
+export interface CaptureDiagnostics {
+  capturing: boolean;
+  /** "auto" = rate is measured; "manual" = the user pinned it. */
+  mode: "auto" | "manual";
+  /** What the user asked for; null in auto mode. */
+  requestedCaptureFps: number | null;
+  /** The rate actually being requested of the capture source right now. */
+  effectiveCaptureFps: number;
+  /** Highest rate this machine has PROVEN it can sustain. Null means not
+   *  yet measured — never a guess, and never the monitor's refresh rate. */
+  measuredSustainableFps: number | null;
+  achievedCaptureFps: number;
+  lastWindowVerdict: CaptureWindowVerdict;
+  measurementConverged: boolean;
+  conclusiveWindows: number;
+  processingFps: number;
+  framesDelivered: number;
+  framesDropped: number;
+  /** Ticks that were actually encoded into pixel-bearing observations —
+   *  always <= framesDelivered, and normally far lower. */
+  framesMaterialized: number;
+  meanCaptureLatencyMs: number | null;
+  bufferedFrames: number;
+  maxBufferedFrames: number;
+  reconnects: number;
+  lastError: string | null;
+}
 
 export interface VisualPerceptionEngineOptions {
   latencyPolicy?: LatencyPolicy;
@@ -113,6 +156,28 @@ export class VisualPerceptionEngine implements VisualStream {
   private running = false;
   private continuousCaptureActive = false;
   private lastMaterializedAtMs = 0;
+
+  // --- Capture capability measurement + diagnostics -------------------
+  // Counters for the window currently being measured. Deliberately plain
+  // numbers mutated in place: ingestContinuousFrame is the hot path and
+  // must stay allocation-light.
+  private readonly capability = new CaptureCapabilityEstimator();
+  private windowStartedAtMs = 0;
+  private windowFramesDelivered = 0;
+  private windowIdleTimeouts = 0;
+  private windowFramesDropped = 0;
+  private windowLatencySum = 0;
+  private windowLatencySamples = 0;
+  private framesMaterialized = 0;
+  private reconnectCount = 0;
+  private lastCaptureError: string | null = null;
+  // Lifetime totals, updated on every tick rather than only when a
+  // measurement window closes — diagnostics must reflect what is
+  // happening now, not what was true as of the last completed window.
+  private framesDeliveredTotal = 0;
+  private framesDroppedTotal = 0;
+  private latencySumTotal = 0;
+  private latencySamplesTotal = 0;
 
   constructor(
     private readonly userId: string,
@@ -222,7 +287,11 @@ export class VisualPerceptionEngine implements VisualStream {
     try {
       await this.provider.startContinuousCapture(
         {
-          captureFps: this.continuousCapturePolicy.captureFps,
+          // null (auto) resolves to the estimator's current target, which
+          // starts as a probe and converges on what this machine actually
+          // sustains. A number is the user's explicit override and is
+          // passed through untouched.
+          captureFps: this.continuousCapturePolicy.captureFps ?? this.capability.targetFps,
           processingFps: this.continuousCapturePolicy.processingFps,
           maxBufferedFrames: this.continuousCapturePolicy.maxBufferedFrames,
         },
@@ -230,6 +299,15 @@ export class VisualPerceptionEngine implements VisualStream {
       );
       this.continuousCaptureActive = true;
       this.lastMaterializedAtMs = 0;
+      this.windowStartedAtMs = 0;
+      this.lastCaptureError = null;
+
+      // Subscribe to the stream's own lifecycle where the platform can
+      // report it. This is what stops `isCapturingContinuously` from
+      // reporting true after a stream has silently died — on a static
+      // desktop a dead stream and a quiet one look identical from here,
+      // so the platform has to say which it is.
+      this.provider.onCaptureStatus?.((state, detail) => this.handleCaptureStatus(state, detail));
     } catch (err) {
       log.warn({ err, userId: this.userId }, "continuous visual capture failed to start; continuing structural-only");
     }
@@ -358,8 +436,140 @@ export class VisualPerceptionEngine implements VisualStream {
     };
 
     this.latestSample = sample;
+    if (materialize) this.framesMaterialized++;
     this.history.record(sample);
     this.publish(sample);
+    this.accumulateCapability(raw);
+  }
+
+  // Rolls the raw tick into the current measurement window and, once the
+  // window is full, lets the estimator judge it. Only meaningful in auto
+  // mode — under a manual override the user's number is authoritative, so
+  // measurement still runs (diagnostics stay honest and the user can see
+  // whether their chosen rate is actually being achieved) but never moves
+  // the requested rate.
+  private accumulateCapability(raw: ContinuousFrameSample): void {
+    const now = raw.atMs;
+    if (this.windowStartedAtMs === 0) this.windowStartedAtMs = now;
+
+    this.framesDeliveredTotal++;
+    this.framesDroppedTotal += raw.dropped ?? 0;
+    if (raw.captureLatencyMs !== undefined) {
+      this.latencySumTotal += raw.captureLatencyMs;
+      this.latencySamplesTotal++;
+    }
+
+    this.windowFramesDelivered++;
+    this.windowIdleTimeouts += raw.idleTimeouts ?? 0;
+    this.windowFramesDropped += raw.dropped ?? 0;
+    if (raw.captureLatencyMs !== undefined) {
+      this.windowLatencySum += raw.captureLatencyMs;
+      this.windowLatencySamples++;
+    }
+
+    const elapsed = now - this.windowStartedAtMs;
+    if (elapsed < CAPABILITY_WINDOW_MS) return;
+
+    const previousTarget = this.capability.targetFps;
+    this.capability.record({
+      framesDelivered: this.windowFramesDelivered,
+      idleTimeouts: this.windowIdleTimeouts,
+      framesDropped: this.windowFramesDropped,
+      windowMs: elapsed,
+      meanFrameLatencyMs: this.windowLatencySamples > 0 ? this.windowLatencySum / this.windowLatencySamples : null,
+    });
+
+    this.windowStartedAtMs = now;
+    this.windowFramesDelivered = 0;
+    this.windowIdleTimeouts = 0;
+    this.windowFramesDropped = 0;
+    this.windowLatencySum = 0;
+    this.windowLatencySamples = 0;
+
+    // In auto mode, a materially changed estimate is worth actually
+    // applying to the capture source. Restarting the stream is not free,
+    // so only do it on a meaningful move, and never from the hot path
+    // synchronously — fire and forget, and never let a failure here
+    // disturb perception.
+    if (this.continuousCapturePolicy.captureFps !== null) return;
+    const target = this.capability.targetFps;
+    if (Math.abs(target - previousTarget) < Math.max(1, previousTarget * 0.1)) return;
+    void this.retuneCaptureRate(target);
+  }
+
+  // Reacts to the platform reporting its capture stream's lifecycle.
+  // Structural perception is untouched by any of this: losing pixels never
+  // costs Jarvis its window/UI-Automation awareness.
+  private handleCaptureStatus(state: CaptureStreamState, detail: string): void {
+    switch (state) {
+      case "capturing":
+        this.continuousCaptureActive = true;
+        this.lastCaptureError = null;
+        // Geometry may have changed across a rebuild (resolution switch,
+        // different monitor), so the measurement window in progress is no
+        // longer comparable with what follows it.
+        this.windowStartedAtMs = 0;
+        break;
+      case "reinitializing":
+      case "reconnecting":
+        // Still nominally capturing, but not delivering right now. Count
+        // it and keep the engine honest about why the stream went quiet.
+        this.reconnectCount++;
+        this.lastCaptureError = detail;
+        break;
+      case "failed":
+      case "stopped":
+        this.continuousCaptureActive = false;
+        this.lastCaptureError = state === "failed" ? detail : null;
+        log.warn({ userId: this.userId, state, detail }, "continuous visual capture ended; Eyes continue structurally");
+        break;
+    }
+  }
+
+  private async retuneCaptureRate(targetFps: number): Promise<void> {
+    if (!this.continuousCaptureActive) return;
+    try {
+      await this.provider.stopContinuousCapture();
+      await this.provider.startContinuousCapture(
+        {
+          captureFps: targetFps,
+          processingFps: this.continuousCapturePolicy.processingFps,
+          maxBufferedFrames: this.continuousCapturePolicy.maxBufferedFrames,
+        },
+        (frame) => this.ingestContinuousFrame(frame),
+      );
+    } catch (err) {
+      // Adapting the rate is an optimization. If it fails, perception
+      // continues at whatever rate the source is already running.
+      this.lastCaptureError = (err as Error).message;
+    }
+  }
+
+  /** Live diagnostics for the capture pipeline (Phase 10). Deliberately
+   *  carries no pixel data and no screen contents — only counters and
+   *  rates, so it is safe to log, expose over the API, and show in a UI. */
+  getCaptureDiagnostics(): CaptureDiagnostics {
+    const report = this.capability.report();
+    return {
+      capturing: this.continuousCaptureActive,
+      mode: this.continuousCapturePolicy.captureFps === null ? "auto" : "manual",
+      requestedCaptureFps: this.continuousCapturePolicy.captureFps,
+      effectiveCaptureFps: this.continuousCapturePolicy.captureFps ?? report.targetFps,
+      measuredSustainableFps: report.sustainedFps,
+      achievedCaptureFps: report.lastAchievedFps,
+      lastWindowVerdict: report.lastVerdict,
+      measurementConverged: report.converged,
+      conclusiveWindows: report.conclusiveWindows,
+      processingFps: this.continuousCapturePolicy.processingFps,
+      framesDelivered: this.framesDeliveredTotal,
+      framesDropped: this.framesDroppedTotal,
+      framesMaterialized: this.framesMaterialized,
+      meanCaptureLatencyMs: this.latencySamplesTotal > 0 ? Math.round((this.latencySumTotal / this.latencySamplesTotal) * 10) / 10 : null,
+      bufferedFrames: this.history.stats(Date.now()).frames,
+      maxBufferedFrames: this.continuousCapturePolicy.maxBufferedFrames,
+      reconnects: this.reconnectCount,
+      lastError: this.lastCaptureError,
+    };
   }
 
   private toSample(event: VisualEvent, foregroundWindow: WindowSummary | null): VisualSample {

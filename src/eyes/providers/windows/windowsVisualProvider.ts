@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { NotConfiguredError, ProviderError } from "../../../utils/errors.js";
 import { childLogger } from "../../../config/logger.js";
-import type { VisualProvider } from "../../visualProvider.js";
+import type { CaptureStreamState, VisualProvider } from "../../visualProvider.js";
 import type {
   ContinuousCaptureOptions,
   ContinuousFrameSample,
@@ -43,6 +43,22 @@ interface RawContinuousFrame {
   changedRegions?: ScreenRegion[];
   changeScore: number;
   pixels: { mimeType: "image/png" | "image/jpeg"; base64: string } | null;
+  /** Acquire attempts that returned "nothing new" since the previous
+   *  delivered frame — how a motionless desktop is told apart from a
+   *  pipeline that can't keep up. */
+  idleTimeouts?: number;
+  captureLatencyMs?: number;
+}
+
+// Shape of a `{"kind":"capture_status",...}` line. The capture thread's
+// lifecycle is reported explicitly so this side never has to infer, from
+// silence alone, whether a stream is alive — silence is ambiguous on a
+// static desktop, which is exactly when a dead stream looks identical to
+// a quiet one.
+interface RawCaptureStatus {
+  state: "capturing" | "reinitializing" | "reconnecting" | "failed" | "stopped";
+  detail: string;
+  atMs: number;
 }
 
 // Real Windows implementation: a single persistent PowerShell/.NET helper
@@ -70,6 +86,8 @@ export class WindowsVisualProvider implements VisualProvider {
   private stdoutBuffer = "";
   private onEventCallback: ((event: VisualEvent) => void) | null = null;
   private onFrameCallback: ((frame: ContinuousFrameSample) => void) | null = null;
+  private onCaptureStatusCallback: ((state: string, detail: string) => void) | null = null;
+  private captureState: string = "stopped";
   private windows: WindowSummary[] = [];
 
   get isRunning(): boolean {
@@ -192,7 +210,21 @@ export class WindowsVisualProvider implements VisualProvider {
           changedRegions: raw.changedRegions ?? [],
           changeScore: raw.changeScore,
           frame: raw.pixels ? { mimeType: raw.pixels.mimeType, base64: raw.pixels.base64, region: null, capturedAt: new Date(raw.atMs).toISOString() } : null,
+          idleTimeouts: raw.idleTimeouts,
+          captureLatencyMs: raw.captureLatencyMs,
         });
+      } else if (parsed.kind === "capture_status") {
+        const status = parsed as unknown as RawCaptureStatus;
+        this.captureState = status.state;
+        // "failed"/"stopped" are terminal for this capture session: drop
+        // the frame sink so a late tick can't be mistaken for a live
+        // stream, and let the engine see capture is no longer running
+        // instead of silently believing it still is.
+        if (status.state === "failed" || status.state === "stopped") {
+          this.onFrameCallback = null;
+        }
+        this.onCaptureStatusCallback?.(status.state, status.detail);
+        log.info({ state: status.state, detail: status.detail }, "continuous capture status");
       } else if (parsed.kind === "response" && typeof parsed.id === "string") {
         const pending = this.pending.get(parsed.id);
         if (!pending) continue;
@@ -263,6 +295,15 @@ export class WindowsVisualProvider implements VisualProvider {
   async captureFrame(region?: ScreenRegion): Promise<VisualFrame> {
     const data = (await this.sendCommand("capture_frame", { region })) as { mimeType: "image/png"; base64: string; region: ScreenRegion };
     return { mimeType: data.mimeType, base64: data.base64, region: data.region, capturedAt: new Date().toISOString() };
+  }
+
+  onCaptureStatus(listener: (state: CaptureStreamState, detail: string) => void): void {
+    this.onCaptureStatusCallback = (state, detail) => listener(state as CaptureStreamState, detail);
+  }
+
+  /** Last lifecycle state reported by the capture thread. */
+  get continuousCaptureState(): string {
+    return this.captureState;
   }
 
   async startContinuousCapture(options: ContinuousCaptureOptions, onFrame: (frame: ContinuousFrameSample) => void): Promise<void> {

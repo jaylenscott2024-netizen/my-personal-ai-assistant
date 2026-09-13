@@ -40,7 +40,9 @@ const eyesUpdateSchema = z.object({
   /** Continuous capture rates ("local Eyes FPS") — independent of any AI
    *  provider's transport rate. 60 is a documented ceiling, never an
    *  assumption the hardware can sustain it. */
-  eyesLocalCaptureFps: z.number().int().min(1).max(60).optional(),
+  // nullable: null means "measure it" (the default). The 480 bound is a
+  // sanity limit, not a cap on how fast Eyes may run.
+  eyesLocalCaptureFps: z.number().int().min(1).max(480).nullable().optional(),
   eyesLocalProcessingFps: z.number().int().min(1).max(60).optional(),
   eyesMaxBufferedFrames: z.number().int().min(1).max(600).optional(),
 });

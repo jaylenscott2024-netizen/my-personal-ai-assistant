@@ -230,6 +230,15 @@ public static class JarvisEyesCapture
     private const uint D3D11_CPU_ACCESS_READ = 0x20000;
     private const uint D3D11_MAP_READ = 1;
     private const int DXGI_ERROR_WAIT_TIMEOUT = unchecked((int)0x887A0027);
+    // Raised when the duplication object stops being valid: a display mode
+    // or resolution change, the secure desktop (UAC prompt / lock screen)
+    // taking over, a GPU driver reset, or the session being detached.
+    // Recoverable — the correct response is to rebuild the duplication,
+    // not to give up on Eyes.
+    private const int DXGI_ERROR_ACCESS_LOST = unchecked((int)0x887A0026);
+    // Another process holds duplication exclusively right now. Also worth
+    // retrying: whatever holds it may well release it.
+    private const int DXGI_ERROR_SESSION_DISCONNECTED = unchecked((int)0x887A0028);
 
     // IDXGIFactory1 — need EnumAdapters1 at absolute vtable slot 7
     // (IDXGIObject: 0-3, IDXGIFactory: EnumAdapters=4, MakeWindowAssociation=5,
@@ -317,12 +326,52 @@ public static class JarvisEyesCapture
     private static Thread _thread;
     private static volatile bool _running;
     private static long _sequence;
+    // Set by the capture loop when it exits because duplication was
+    // invalidated but is worth rebuilding (as opposed to a hard failure).
+    private static volatile bool _needsReinit;
+    private static int _reconnects;
+
+    /** Status/lifecycle message for the Node side. Without this the engine
+     *  cannot tell a live stream from one that died mid-session — it would
+     *  keep reporting Eyes as capturing long after the duplication handle
+     *  went bad. */
+    private static void EmitCaptureStatus(string state, string detail)
+    {
+        var json = new StringBuilder(128);
+        json.Append("{\"kind\":\"capture_status\",\"state\":\"").Append(state).Append("\"");
+        json.Append(",\"detail\":").Append(JsonQuote(detail));
+        json.Append(",\"atMs\":").Append(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()).Append("}");
+        Monitor.Enter(StdoutLock);
+        try { Console.Out.WriteLine(json.ToString()); Console.Out.Flush(); }
+        finally { Monitor.Exit(StdoutLock); }
+    }
+
+    private static string JsonQuote(string s)
+    {
+        if (s == null) return "null";
+        var sb = new StringBuilder(s.Length + 8);
+        sb.Append('"');
+        foreach (char c in s)
+        {
+            if (c == '"') sb.Append("\\\"");
+            else if (c == '\\') sb.Append("\\\\");
+            else if (c == '\n') sb.Append("\\n");
+            else if (c == '\r') sb.Append("\\r");
+            else if (c == '\t') sb.Append("\\t");
+            else if (c < 32) sb.Append("\\u").Append(((int)c).ToString("X4", System.Globalization.CultureInfo.InvariantCulture));
+            else sb.Append(c);
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
 
     public static bool Start(int displayIndex, int captureFps, int processingFps, int maxBufferedFrames)
     {
         if (_running) return true;
         _running = true;
         _sequence = 0;
+        _reconnects = 0;
+        _needsReinit = false;
 
         var ready = new ManualResetEventSlim(false);
         bool initOk = false;
@@ -332,17 +381,54 @@ public static class JarvisEyesCapture
         {
             try
             {
-                RunCaptureLoop(displayIndex, captureFps, processingFps, ref initOk, ref initError, ready);
+                // Outer reconnect loop. A duplication session can be
+                // invalidated by things that are entirely normal on a
+                // desktop — changing resolution, a UAC prompt, locking the
+                // screen, a GPU driver reset, plugging in a monitor. None
+                // of those should end Jarvis's vision permanently, so the
+                // loop rebuilds duplication (re-reading desktop dimensions,
+                // which is what makes a resolution change work) and carries
+                // on. Backoff keeps a persistently broken session from
+                // spinning the CPU.
+                int attempt = 0;
+                while (_running)
+                {
+                    _needsReinit = false;
+                    RunCaptureLoop(displayIndex, captureFps, processingFps, ref initOk, ref initError, ready);
+
+                    if (!_running) break;
+                    if (!_needsReinit)
+                    {
+                        // Either init failed outright or the loop hit a
+                        // non-recoverable error; both already reported.
+                        break;
+                    }
+
+                    attempt++;
+                    _reconnects++;
+                    // 250ms, 500ms, 1s, 2s, capped at 4s. The secure desktop
+                    // can hold duplication for a while; give it room without
+                    // becoming unresponsive once it lets go.
+                    int backoffMs = (int)Math.Min(4000, 250 * Math.Pow(2, Math.Min(attempt - 1, 4)));
+                    // Sleep in slices rather than one long block, so Stop()
+                    // is honoured promptly instead of having to wait out a
+                    // backoff that may be longer than its join timeout.
+                    for (int slept = 0; slept < backoffMs && _running; slept += 50) Thread.Sleep(50);
+                    if (!_running) break;
+                    EmitCaptureStatus("reconnecting", "attempt " + attempt);
+                }
             }
             catch (Exception ex)
             {
                 initError = ex;
                 initOk = false;
                 if (!ready.IsSet) ready.Set();
+                EmitCaptureStatus("failed", ex.Message);
             }
             finally
             {
                 _running = false;
+                EmitCaptureStatus("stopped", "capture thread exited");
             }
         });
         _thread.IsBackground = true;
@@ -426,6 +512,11 @@ public static class JarvisEyesCapture
 
             initOk = true;
             ready.Set();
+            // Announce the live geometry. After a rebuild triggered by a
+            // resolution or monitor change these values will differ from
+            // the previous session's, which is exactly what the Node side
+            // needs in order to stop assuming the old dimensions.
+            EmitCaptureStatus("capturing", "display " + displayIndex + " " + width + "x" + height + " reconnects=" + _reconnects);
         }
         catch (Exception ex)
         {
@@ -440,26 +531,49 @@ public static class JarvisEyesCapture
         var ctx = (ID3D11DeviceContext)context;
         uint timeoutMs = (uint)Math.Max(1, 1000 / Math.Max(1, captureFps));
         double minMaterializeIntervalMs = processingFps > 0 ? 1000.0 / processingFps : double.PositiveInfinity;
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var latencyWatch = System.Diagnostics.Stopwatch.StartNew();
+
+        // Telemetry the capability estimator on the Node side depends on.
+        // idleTimeouts is the important one: it is the ONLY thing that
+        // distinguishes "the desktop is motionless" from "this machine
+        // cannot keep up", and without it a static screen would be
+        // misread as a slow pipeline. See eyes/captureCapability.ts.
+        int idleTimeoutsSinceDelivery = 0;
 
         while (_running)
         {
             DXGI_OUTDUPL_FRAME_INFO frameInfo;
             IntPtr desktopResourcePtr;
+            long acquireStartTicks = latencyWatch.ElapsedTicks;
             int hr = dup.AcquireNextFrame(timeoutMs, out frameInfo, out desktopResourcePtr);
-            if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue; // no new frame within the timeout — not an error, just try again
+
+            if (hr == DXGI_ERROR_WAIT_TIMEOUT)
+            {
+                // The desktop simply produced nothing. Not an error, and
+                // emphatically not evidence about capture capability.
+                idleTimeoutsSinceDelivery++;
+                continue;
+            }
+
+            if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_SESSION_DISCONNECTED)
+            {
+                // Recoverable: a resolution/mode change, the secure desktop,
+                // or a driver reset invalidated duplication. Rebuild it
+                // rather than silently ending Eyes. Returning true tells the
+                // caller to re-initialize (which also re-reads the desktop
+                // dimensions, so a resolution change is picked up correctly).
+                EmitCaptureStatus("reinitializing", "duplication invalidated (0x" + hr.ToString("X8") + ")");
+                _needsReinit = true;
+                break;
+            }
+
             if (hr < 0)
             {
-                // Session lost (e.g. display mode change, lock screen, GPU
-                // driver reset) — stop rather than spin on a broken
-                // duplication handle. KNOWN GAP: this notifies no one — the
-                // Node side has no signal that continuous capture silently
-                // died mid-session and will believe it is still active
-                // until the next explicit stop/start. A production-hardened
-                // version should emit a `{"kind":"frame_stream_closed"}`
-                // message here and have the engine treat it as a cue to
-                // retry startContinuousCapture rather than relying on a
-                // user-initiated settings change to notice.
+                // Genuinely unexpected. Report it rather than dying mutely —
+                // the Node side marks capture inactive on this message
+                // instead of believing a dead stream is still running.
+                EmitCaptureStatus("failed", "AcquireNextFrame failed: 0x" + hr.ToString("X8"));
+                _needsReinit = false;
                 break;
             }
 
@@ -501,7 +615,17 @@ public static class JarvisEyesCapture
                 json.Append(",\"atMs\":").Append(nowMs);
                 json.Append(",\"displayId\":\"").Append(displayIndex).Append("\"");
                 json.Append(",\"width\":").Append(width).Append(",\"height\":").Append(height);
-                json.Append(",\"changeScore\":").Append(changeScore.ToString("0.###"));
+                // InvariantCulture matters here: on a machine whose locale
+                // uses a comma decimal separator (de-DE, fr-FR, …) the
+                // default ToString would emit 0,75 and produce invalid JSON
+                // that breaks the whole newline-JSON protocol.
+                json.Append(",\"changeScore\":").Append(changeScore.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+                // Acquire-to-emit latency, and how many times the display
+                // had nothing to give since the previous delivered frame.
+                double latencyMs = (latencyWatch.ElapsedTicks - acquireStartTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                json.Append(",\"captureLatencyMs\":").Append(latencyMs.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+                json.Append(",\"idleTimeouts\":").Append(idleTimeoutsSinceDelivery);
+                idleTimeoutsSinceDelivery = 0;
                 json.Append(",\"changedRegions\":[");
                 for (int i = 0; i < dirtyCount && i < dirty.Length; i++)
                 {
