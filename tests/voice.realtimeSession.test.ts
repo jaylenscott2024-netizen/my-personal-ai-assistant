@@ -249,3 +249,86 @@ describe("RealtimeVoiceSession", () => {
     expect(session.getState()).toBe("listening");
   });
 });
+
+// Section 88: "stt" mode — audio in, TEXT reply out, no audio ever
+// produced. Proves synthesizeStream is genuinely never invoked, not just
+// that its output happens to go unused.
+describe("RealtimeVoiceSession — speakReplies: false (pure stt mode)", () => {
+  it("never calls the voice provider's synthesis and never emits an audio chunk", async () => {
+    const fakeVoice = new FakeVoiceProvider();
+    fakeVoice.transcriptToReturn = "what's the weather";
+    __registerVoiceProviderForTesting(fakeVoice);
+
+    const { userId, role, conversationId } = await makeUserAndConversation();
+    const states: RealtimeVoiceState[] = [];
+    const audioChunks: Buffer[] = [];
+    let assistantText = "";
+    let doneResolve: () => void;
+    const done = new Promise<void>((resolve) => (doneResolve = resolve));
+
+    const session = new RealtimeVoiceSession({
+      userId, role, conversationId,
+      aiProviderId: "mock", aiModel: "mock-1",
+      voiceProviderId: "fake-voice", sttProviderId: "fake-voice",
+      speakReplies: false,
+      onAudioChunk: (chunk) => audioChunks.push(chunk),
+      onTranscript: () => {},
+      onAssistantText: (text) => {
+        assistantText = text;
+        doneResolve();
+      },
+      onStateChange: (state) => states.push(state),
+      onError: (message) => {
+        throw new Error(`Unexpected voice session error: ${message}`);
+      },
+    });
+
+    session.feedAudio(makeSyntheticUtterance());
+    await done;
+
+    expect(assistantText.length).toBeGreaterThan(0); // the reply still reaches the caller...
+    expect(audioChunks).toHaveLength(0); // ...but never as audio
+    expect(fakeVoice.synthesizeCalls).toHaveLength(0); // synthesis was never even attempted
+    expect(states).not.toContain("speaking"); // this mode never enters the speaking state
+  });
+});
+
+// Section 88: "tts" mode — text in via respondToText(), speech out. Proves
+// the reply path works with no microphone/STT involvement whatsoever.
+describe("RealtimeVoiceSession — respondToText (pure tts mode)", () => {
+  it("synthesizes a reply to typed text without any STT ever running", async () => {
+    const fakeVoice = new FakeVoiceProvider();
+    __registerVoiceProviderForTesting(fakeVoice);
+
+    const { userId, role, conversationId } = await makeUserAndConversation();
+    const audioChunks: Buffer[] = [];
+    let assistantText = "";
+    let doneResolve: () => void;
+    const done = new Promise<void>((resolve) => (doneResolve = resolve));
+
+    const session = new RealtimeVoiceSession({
+      userId, role, conversationId,
+      aiProviderId: "mock", aiModel: "mock-1",
+      voiceProviderId: "fake-voice", sttProviderId: "fake-voice",
+      onAudioChunk: (chunk) => audioChunks.push(chunk),
+      onTranscript: () => {
+        throw new Error("STT must never run in tts mode");
+      },
+      onAssistantText: (text) => {
+        assistantText = text;
+        doneResolve();
+      },
+      onStateChange: () => {},
+      onError: (message) => {
+        throw new Error(`Unexpected voice session error: ${message}`);
+      },
+    });
+
+    await session.respondToText("Tell me a fact.");
+    await done;
+
+    expect(assistantText.length).toBeGreaterThan(0);
+    expect(audioChunks.length).toBeGreaterThan(0); // spoken, unlike stt mode
+    expect(fakeVoice.synthesizeCalls.length).toBeGreaterThan(0);
+  });
+});

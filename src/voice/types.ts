@@ -52,6 +52,20 @@ export interface VoiceProvider {
   listVoices(userId?: string): Promise<VoiceInfo[]>;
 }
 
-// Section 88: the four modes a client may explicitly select. The backend
-// never infers or switches between these on its own.
-export type VoiceMode = "stt" | "tts" | "speech_to_speech" | "realtime_voice";
+// Section 88: the three voice modes a client explicitly selects — never
+// inferred from message content, and never switched between automatically
+// by the backend. Each is a genuinely different pipeline, not a UI label
+// over the same one:
+//
+//   "speech_to_speech" — NATIVE audio-to-audio, one live session with a
+//   realtime-capable model (voice/realtime/nativeRealtimeSession.ts).
+//   Neither a VoiceProvider's transcribe() nor synthesize() is called at
+//   any point in this mode — there is no STT/TTS step to be "hidden"
+//   because none exists in this path at all.
+//
+//   "stt" — microphone audio in, transcript + the agent's TEXT reply out.
+//   No audio is ever synthesized in this mode.
+//
+//   "tts" — typed text in, synthesized speech out. No microphone audio is
+//   ever accepted in this mode.
+export type VoiceMode = "speech_to_speech" | "stt" | "tts";

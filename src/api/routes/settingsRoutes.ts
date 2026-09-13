@@ -18,6 +18,13 @@ const voiceUpdateSchema = z.object({
   voiceId: z.string().nullable().optional(),
   voiceModel: z.string().nullable().optional(),
   sttProvider: z.string().optional(),
+  /** UI convenience only — see UserSettings.voiceMode's own doc comment.
+   *  Never used by the backend to select a mode for an active connection;
+   *  every /ws/voice connection must state its mode explicitly. */
+  voiceMode: z.enum(["speech_to_speech", "stt", "tts"]).optional(),
+  realtimeVoiceProvider: z.string().optional(),
+  realtimeVoiceModel: z.string().optional(),
+  realtimeVoiceToolsEnabled: z.boolean().optional(),
 });
 
 const identityUpdateSchema = z.object({
@@ -37,11 +44,10 @@ const eyesUpdateSchema = z.object({
    *  keeps in RAM. */
   eyesHistorySeconds: z.number().int().min(5).max(1800).optional(),
   eyesMaxKeyframes: z.number().int().min(0).max(120).optional(),
-  /** Continuous capture rates ("local Eyes FPS") — independent of any AI
-   *  provider's transport rate. 60 is a documented ceiling, never an
-   *  assumption the hardware can sustain it. */
-  // nullable: null means "measure it" (the default). The 480 bound is a
-  // sanity limit, not a cap on how fast Eyes may run.
+  // Continuous capture rate ("local Eyes FPS") — independent of any AI
+  // provider's transport rate. Nullable: null means "measure it" (the
+  // default, see eyes/captureCapability.ts). The 480 bound is a sanity
+  // limit against a nonsense value, never a cap on how fast Eyes may run.
   eyesLocalCaptureFps: z.number().int().min(1).max(480).nullable().optional(),
   eyesLocalProcessingFps: z.number().int().min(1).max(60).optional(),
   eyesMaxBufferedFrames: z.number().int().min(1).max(600).optional(),

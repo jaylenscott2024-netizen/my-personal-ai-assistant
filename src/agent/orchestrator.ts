@@ -274,7 +274,19 @@ async function executeLoop(
   }
 }
 
-interface ToolCallOutcome {
+// The subset of RunAgentInput executeToolCall actually needs. Narrowed
+// deliberately so a caller that isn't running the text agent loop at all
+// (the native realtime voice session, driving tool calls the model asked
+// for over its own audio channel) can reuse this exact permission/
+// approval/execution path without fabricating an unused ChatRequest's
+// worth of fields.
+export interface ToolCallActor {
+  userId: string;
+  role: string;
+  taskId?: string;
+}
+
+export interface ToolCallOutcome {
   status: "executed" | "waiting_for_approval";
   contentForModel: string;
   untrusted?: boolean;
@@ -288,9 +300,9 @@ interface ToolCallOutcome {
   visualContext?: VisualContext;
 }
 
-async function executeToolCall(
+export async function executeToolCall(
   agentRunId: string,
-  input: RunAgentInput,
+  input: ToolCallActor,
   call: { id: string; name: string; arguments: Record<string, unknown> },
   signal: AbortSignal,
 ): Promise<ToolCallOutcome> {

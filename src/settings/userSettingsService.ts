@@ -1,5 +1,6 @@
 import { prisma } from "../database/client.js";
 import { ValidationError } from "../utils/errors.js";
+import type { VoiceMode } from "../voice/types.js";
 
 // Section 11/12/28/29/88: persistent, user-controlled assistant identity,
 // activation, and voice configuration. Replaces the old in-memory-only
@@ -33,6 +34,23 @@ export interface UserSettings {
   voiceId: string | null;
   voiceModel: string | null;
   sttProvider: string;
+  /** The user's last explicitly selected voice mode (voice/types.ts) —
+   *  purely a UI convenience for which mode to show selected on
+   *  reconnect. The backend never uses this to infer or auto-select a
+   *  mode for an active connection: every /ws/voice connection must state
+   *  its mode explicitly (Section 88 — "the user chooses the mode"). */
+  voiceMode: VoiceMode;
+  /** Which RealtimeAudioProvider (voice/realtime/) to use for the native
+   *  "speech_to_speech" mode. Separate from voiceProvider/sttProvider,
+   *  which are for the "tts"/"stt" modes and have no bearing on this one. */
+  realtimeVoiceProvider: string;
+  /** Provider-specific realtime model id, e.g. an OpenAI Realtime model. */
+  realtimeVoiceModel: string;
+  /** Whether the model may call tools during a native speech_to_speech
+   *  session. False means conversation-only — an explicit choice, since a
+   *  voice session that can take real actions is a materially different
+   *  risk surface from one that can only talk. */
+  realtimeVoiceToolsEnabled: boolean;
   /** Jarvis "Eyes" visual perception (EYES.md). Off by default. */
   eyesEnabled: boolean;
   eyesMode: EyesMode;
@@ -80,6 +98,12 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   voiceId: null,
   voiceModel: null,
   sttProvider: "elevenlabs",
+  // "stt" as the default UI pre-selection only — see the field's own doc
+  // comment: an actual connection must still state its mode explicitly.
+  voiceMode: "stt",
+  realtimeVoiceProvider: "openai-realtime",
+  realtimeVoiceModel: "gpt-realtime",
+  realtimeVoiceToolsEnabled: false,
   eyesEnabled: false,
   eyesMode: "structural_only",
   eyesAttentionMode: "auto",
@@ -93,6 +117,7 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
 };
 
 const ACTIVATION_MODES: ActivationMode[] = ["push_to_talk", "wake_word", "clap", "disabled"];
+const VOICE_MODES: VoiceMode[] = ["speech_to_speech", "stt", "tts"];
 const CLAP_PATTERNS: ClapPattern[] = ["single", "double", "triple"];
 const EYES_MODES: EyesMode[] = ["structural_only", "structural_plus_visual"];
 const EYES_ATTENTION_MODES: EyesAttentionMode[] = ["auto", "manual"];
@@ -109,6 +134,10 @@ interface UserSettingsRow {
   voiceId: string | null;
   voiceModel: string | null;
   sttProvider: string;
+  voiceMode: string;
+  realtimeVoiceProvider: string;
+  realtimeVoiceModel: string;
+  realtimeVoiceToolsEnabled: boolean;
   eyesEnabled: boolean;
   eyesMode: string;
   eyesAttentionMode: string;
@@ -141,6 +170,10 @@ function rowToSettings(row: UserSettingsRow): UserSettings {
     voiceId: row.voiceId,
     voiceModel: row.voiceModel,
     sttProvider: row.sttProvider,
+    voiceMode: row.voiceMode as VoiceMode,
+    realtimeVoiceProvider: row.realtimeVoiceProvider,
+    realtimeVoiceModel: row.realtimeVoiceModel,
+    realtimeVoiceToolsEnabled: row.realtimeVoiceToolsEnabled,
     eyesEnabled: row.eyesEnabled,
     eyesMode: row.eyesMode as EyesMode,
     eyesAttentionMode: row.eyesAttentionMode as EyesAttentionMode,
@@ -168,6 +201,9 @@ export async function updateUserSettings(userId: string, updates: Partial<UserSe
   }
   if (updates.clapSensitivity !== undefined && (updates.clapSensitivity < 1 || updates.clapSensitivity > 10)) {
     throw new ValidationError("clapSensitivity must be between 1 and 10.");
+  }
+  if (updates.voiceMode && !VOICE_MODES.includes(updates.voiceMode)) {
+    throw new ValidationError(`Invalid voiceMode "${updates.voiceMode}".`);
   }
   if (updates.eyesMode && !EYES_MODES.includes(updates.eyesMode)) {
     throw new ValidationError(`Invalid eyesMode "${updates.eyesMode}".`);

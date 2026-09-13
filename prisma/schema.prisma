@@ -64,6 +64,10 @@ model UserSettings {
   voiceId       String?
   voiceModel    String?
   sttProvider   String  @default("elevenlabs")
+  voiceMode     String  @default("stt")
+  realtimeVoiceProvider     String  @default("openai-realtime")
+  realtimeVoiceModel        String  @default("gpt-realtime")
+  realtimeVoiceToolsEnabled Boolean @default(false)
 
   // Jarvis "Eyes" visual perception (see EYES.md). Off by default —
   // screen content is sensitive; the user opts in explicitly. Visual

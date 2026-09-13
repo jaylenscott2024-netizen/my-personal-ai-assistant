@@ -20,6 +20,15 @@ export interface RealtimeVoiceSessionOptions {
   voiceId?: string;
   voiceModel?: string;
   vad?: Partial<VadConfig>;
+  /** False puts this session into pure "stt" mode (voice/types.ts):
+   *  transcript and the agent's text reply are delivered, but
+   *  synthesizeStream/synthesize are never called and no audio is ever
+   *  produced. Defaults to true, which preserves this class's original,
+   *  pre-existing behavior (the full STT -> agent -> streaming-TTS relay
+   *  loop with barge-in) unchanged — still what a /ws/voice connection
+   *  gets when it doesn't specify an explicit `mode`, for backward
+   *  compatibility with clients written before mode selection existed. */
+  speakReplies?: boolean;
   onAudioChunk: (chunk: Buffer, mimeType: string) => void;
   onTranscript: (text: string) => void;
   onAssistantText: (text: string) => void;
@@ -160,6 +169,16 @@ export class RealtimeVoiceSession {
     await this.respondTo(text);
   }
 
+  /** Pure "tts" mode entry point (voice/types.ts): text in, synthesized
+   *  speech out. No microphone audio and no STT provider are ever
+   *  involved — this bypasses feedAudio/VAD/transcription entirely and
+   *  goes straight to the agent, exactly as respondTo() does for a
+   *  transcribed utterance. */
+  async respondToText(text: string): Promise<void> {
+    if (this.closed) return;
+    await this.respondTo(text);
+  }
+
   private async respondTo(userText: string): Promise<void> {
     const generation = ++this.responseGeneration;
     const isCurrent = () => !this.closed && this.responseGeneration === generation;
@@ -254,6 +273,12 @@ export class RealtimeVoiceSession {
 
   private async speak(text: string): Promise<void> {
     if (this.closed) return;
+    if (this.opts.speakReplies === false) {
+      // Pure "stt" mode (voice/types.ts): the agent's text reply already
+      // reached the caller via onAssistantText in respondTo(). Nothing is
+      // synthesized — synthesizeStream is never called in this mode.
+      return;
+    }
     this.setState("speaking");
 
     const voiceProvider = getVoiceProvider(this.opts.voiceProviderId);
