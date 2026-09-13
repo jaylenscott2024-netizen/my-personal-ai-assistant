@@ -26,39 +26,131 @@ function frame(bytes = 1200): VisualFrame {
   return { mimeType: "image/png", base64: "a".repeat(bytes), region: null, capturedAt: new Date().toISOString() };
 }
 
-// Section 4: the temporal buffer is what makes "what just happened?"
-// answerable without any capture at query time — but it lives in RAM, so
-// every one of its bounds is load-bearing.
-describe("VisualHistory bounds", () => {
-  it("caps retained samples by count, dropping the oldest", () => {
-    const history = new VisualHistory({ maxSamples: 3, maxAgeMs: 10 * 60_000, maxFrames: 100, maxFrameBytes: 10 ** 9 });
-    const first = sample();
-    history.record(first);
-    history.record(sample());
-    history.record(sample());
-    history.record(sample());
+// Section 4: HIGH-FREQUENCY SHORT BUFFER (hot) + LOW-FREQUENCY LONGER
+// BUFFER (warm) + SIGNIFICANT-EVENT KEYFRAMES — the three-tier model a
+// continuous capture stream actually needs. Every accepted observation
+// lands in hot unconditionally; warm and keyframes are independent,
+// narrower promotions from the same stream.
+describe("VisualHistory tiering", () => {
+  it("writes every observation to the hot tier regardless of significance", () => {
+    const history = new VisualHistory({ hotMaxSamples: 10, hotMaxAgeMs: 60_000 });
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) history.record(sample({ atMs: now + i, attentionScore: 0.05 }));
 
-    const retained = history.query({}, first.atMs + 1000);
-    expect(retained).toHaveLength(3);
-    expect(retained.includes(first)).toBe(false);
-    expect(history.stats(first.atMs + 1000).droppedSamples).toBe(1);
+    expect(history.stats(now + 100).tiers.hot).toBe(5);
+    expect(history.query({}, now + 100)).toHaveLength(5);
   });
 
-  it("evicts by age on both write and read", () => {
+  it("bounds the hot tier by count independently of the warm/keyframe limits", () => {
+    const history = new VisualHistory({ hotMaxSamples: 3, maxSamples: 100, maxAgeMs: 600_000 });
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) history.record(sample({ atMs: now + i, attentionScore: 0.05 }));
+
+    expect(history.stats(now + 100).tiers.hot).toBeLessThanOrEqual(3);
+  });
+
+  it("bounds the hot tier by age independently of the warm tier's age", () => {
+    const history = new VisualHistory({ hotMaxSamples: 100, hotMaxAgeMs: 1_000, maxAgeMs: 600_000 });
     const now = 2_000_000;
-    const history = new VisualHistory({ maxSamples: 100, maxAgeMs: 5_000, maxFrames: 100, maxFrameBytes: 10 ** 9 });
-    history.record(sample({ atMs: now - 60_000 }));
-    history.record(sample({ atMs: now - 1_000 }));
+    history.record(sample({ atMs: now - 5_000, attentionScore: 0.05 })); // old — should age out of hot
+    history.record(sample({ atMs: now - 100, attentionScore: 0.05 }));
+
+    expect(history.stats(now).tiers.hot).toBe(1);
+  });
+
+  it("promotes into the warm tier on a time bucket even without high significance", () => {
+    const history = new VisualHistory({ warmBucketMs: 1_000, warmSignificanceFloor: 0.9, maxSamples: 100, maxAgeMs: 600_000 });
+    const now = 1_000_000;
+    history.record(sample({ atMs: now, attentionScore: 0.1 }));
+    history.record(sample({ atMs: now + 1_500, attentionScore: 0.1 })); // past the bucket window
+
+    expect(history.stats(now + 1_500).tiers.warm).toBe(2);
+  });
+
+  it("promotes into the warm tier ahead of schedule when significance is high enough", () => {
+    const history = new VisualHistory({ warmBucketMs: 10_000, warmSignificanceFloor: 0.6, maxSamples: 100, maxAgeMs: 600_000 });
+    const now = 1_000_000;
+    history.record(sample({ atMs: now, attentionScore: 0.1 }));
+    history.record(sample({ atMs: now + 50, attentionScore: 0.9 })); // well inside the bucket window, but significant
+
+    expect(history.stats(now + 50).tiers.warm).toBe(2);
+  });
+
+  it("keeps a frame governed by the shared budget even once only the warm tier still holds it", () => {
+    // Promotion never copies or strips — a sample keeps whatever it
+    // arrived with wherever it's retained. So the frame budget has to
+    // scan every tier a sample could be sitting in, not just hot/
+    // keyframes, or a frame that outlives hot's short window but is
+    // still held by warm's much longer one would silently escape the
+    // bound. This proves that doesn't happen.
+    const history = new VisualHistory({
+      hotMaxSamples: 100,
+      hotMaxAgeMs: 50, // hot ages this out almost immediately
+      warmBucketMs: 0,
+      maxSamples: 100,
+      maxAgeMs: 600_000,
+      maxFrames: 1,
+      maxFrameBytes: 10 ** 9,
+      keyframeMinAttentionScore: 0.99, // high enough that this sample never becomes a keyframe either
+    });
+    const now = Date.now();
+    const older = sample({ atMs: now, attentionScore: 0.5, frame: frame() });
+    history.record(older);
+
+    // Age hot out, then record a second framed sample — the budget
+    // (maxFrames: 1) must still find `older` via the warm tier to strip.
+    const newer = sample({ atMs: now + 1_000, attentionScore: 0.5, frame: frame() });
+    history.record(newer);
+
+    expect(history.stats(now + 1_000).tiers.hot).toBe(1); // `older` has aged out of hot
+    expect(older.frame).toBeNull(); // ...but the budget still found and stripped it via warm
+    expect(newer.frame).not.toBeNull();
+  });
+
+  it("promotes into the keyframe tier only when the sample carries a frame AND clears the threshold", () => {
+    const history = new VisualHistory({ keyframeMinAttentionScore: 0.7, maxSamples: 100, maxAgeMs: 600_000 });
+    const now = Date.now();
+    history.record(sample({ atMs: now, attentionScore: 0.9, frame: null })); // significant but no pixels
+    history.record(sample({ atMs: now + 1, attentionScore: 0.3, frame: frame() })); // pixels but not significant
+    history.record(sample({ atMs: now + 2, attentionScore: 0.9, frame: frame() })); // both
+
+    expect(history.stats(now + 2).tiers.keyframes).toBe(1);
+  });
+
+  it("merges and deduplicates across tiers on query rather than double-counting shared samples", () => {
+    const history = new VisualHistory({ warmBucketMs: 0, keyframeMinAttentionScore: 0.5, maxSamples: 100, maxAgeMs: 600_000 });
+    const now = Date.now();
+    // High significance + a frame: eligible for hot, warm, AND keyframes simultaneously.
+    history.record(sample({ atMs: now, attentionScore: 0.9, frame: frame() }));
 
     expect(history.query({}, now)).toHaveLength(1);
+    expect(history.stats(now).samples).toBe(1);
   });
 
+  it("clear() empties every tier", () => {
+    const history = new VisualHistory();
+    history.record(sample({ attentionScore: 0.9, frame: frame() }));
+    history.clear();
+
+    const stats = history.stats(Date.now());
+    expect(stats.samples).toBe(0);
+    expect(stats.tiers).toEqual({ hot: 0, warm: 0, keyframes: 0 });
+    expect(history.latest()).toBeNull();
+  });
+});
+
+describe("VisualHistory frame budget", () => {
   it("strips frame payloads beyond the frame-count budget but keeps the structural record", () => {
-    const history = new VisualHistory({ maxSamples: 100, maxAgeMs: 600_000, maxFrames: 2, maxFrameBytes: 10 ** 9 });
-    const samples = [sample({ frame: frame() }), sample({ frame: frame() }), sample({ frame: frame() })];
+    const history = new VisualHistory({ maxFrames: 2, maxFrameBytes: 10 ** 9, keyframeMinAttentionScore: 0.5, warmBucketMs: 0 });
+    const now = Date.now();
+    const samples = [
+      sample({ atMs: now, attentionScore: 0.9, frame: frame() }),
+      sample({ atMs: now + 1, attentionScore: 0.9, frame: frame() }),
+      sample({ atMs: now + 2, attentionScore: 0.9, frame: frame() }),
+    ];
     for (const s of samples) history.record(s);
 
-    const retained = history.query({}, samples[2].atMs + 10);
+    const retained = history.query({}, now + 2);
     // The timeline survives intact...
     expect(retained).toHaveLength(3);
     // ...but only the newest two still carry pixels.
@@ -68,24 +160,27 @@ describe("VisualHistory bounds", () => {
   });
 
   it("strips frame payloads beyond the byte budget, oldest first", () => {
-    const history = new VisualHistory({ maxSamples: 100, maxAgeMs: 600_000, maxFrames: 100, maxFrameBytes: 2_000 });
-    const a = sample({ frame: frame(1_600) }); // ~1200 bytes decoded
-    const b = sample({ frame: frame(1_600) });
+    const history = new VisualHistory({ maxFrames: 100, maxFrameBytes: 2_000, keyframeMinAttentionScore: 0.5 });
+    const now = Date.now();
+    const a = sample({ atMs: now, attentionScore: 0.9, frame: frame(1_600) });
+    const b = sample({ atMs: now + 1, attentionScore: 0.9, frame: frame(1_600) });
     history.record(a);
     history.record(b);
 
-    const stats = history.stats(b.atMs + 10);
+    const stats = history.stats(now + 1);
     expect(stats.approxFrameBytes).toBeLessThanOrEqual(2_000);
     expect(stats.strippedFrames).toBeGreaterThan(0);
     expect(a.frame).toBeNull();
     expect(b.frame).not.toBeNull(); // newest imagery is the one worth keeping
   });
 
-  it("setLimits re-enforces immediately against already-retained samples", () => {
-    const history = new VisualHistory({ maxSamples: 100, maxAgeMs: 600_000, maxFrames: 100, maxFrameBytes: 10 ** 9 });
-    for (let i = 0; i < 10; i++) history.record(sample());
-    history.setLimits({ maxSamples: 4 });
-    expect(history.query({}, Date.now()).length).toBeLessThanOrEqual(4);
+  it("setLimits re-enforces the frame budget immediately against already-retained samples", () => {
+    const history = new VisualHistory({ maxFrames: 100, maxFrameBytes: 10 ** 9, keyframeMinAttentionScore: 0.5 });
+    const now = Date.now();
+    for (let i = 0; i < 10; i++) history.record(sample({ atMs: now + i, attentionScore: 0.9, frame: frame() }));
+
+    history.setLimits({ maxFrames: 2 });
+    expect(history.stats(now + 10).frames).toBeLessThanOrEqual(2);
   });
 });
 
@@ -147,6 +242,16 @@ describe("VisualHistory queries", () => {
     history.record(sample());
     history.clear();
     expect(history.query({}, Date.now())).toHaveLength(0);
+  });
+
+  it("latest() always reflects the most recent observation regardless of which tiers hold it", () => {
+    const history = new VisualHistory();
+    const now = Date.now();
+    history.record(sample({ atMs: now - 100, summary: "older" }));
+    const newest = sample({ atMs: now, summary: "newest" });
+    history.record(newest);
+
+    expect(history.latest()).toBe(newest);
   });
 });
 

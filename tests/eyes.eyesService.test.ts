@@ -14,7 +14,7 @@ class FakeVisualProvider implements VisualProvider {
     return this.running;
   }
   getCapabilities(): VisualProviderCapabilities {
-    return { supported: true, windowEvents: true, uiAutomationEvents: true, uiAutomationQueries: true, onDemandFrameCapture: true };
+    return { supported: true, windowEvents: true, uiAutomationEvents: true, uiAutomationQueries: true, onDemandFrameCapture: true, continuousCapture: { supported: false, technology: null, maxCaptureFps: null, supportsDirtyRects: false, supportsMultiDisplay: false } };
   }
   async start(_onEvent: (event: VisualEvent) => void): Promise<void> {
     this.running = true;
@@ -40,6 +40,8 @@ class FakeVisualProvider implements VisualProvider {
   async captureFrame(): Promise<VisualFrame> {
     return { mimeType: "image/png", base64: "x", region: null, capturedAt: new Date().toISOString() };
   }
+  async startContinuousCapture(): Promise<void> {}
+  async stopContinuousCapture(): Promise<void> {}
 }
 
 async function makeUser() {

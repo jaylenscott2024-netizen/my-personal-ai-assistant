@@ -10,19 +10,20 @@ import { VisualPerceptionEngine } from "../src/eyes/visualPerceptionEngine.js";
 import { coalesceLatest } from "../src/eyes/visualStream.js";
 import { realtimeVisualSessions, PacedRealtimeVisualFeed, type RealtimeVisualNegotiation, type RealtimeVisualSink } from "../src/eyes/transport/realtimeVisualTransport.js";
 import type { VisualProvider } from "../src/eyes/visualProvider.js";
-import type { UIElementNode, VisualEvent, VisualFrame, VisualProviderCapabilities, WindowSummary } from "../src/eyes/types.js";
+import type { ContinuousFrameSample, UIElementNode, VisualEvent, VisualFrame, VisualProviderCapabilities, WindowSummary } from "../src/eyes/types.js";
 import type { VisualSample } from "../src/eyes/visualStream.js";
 
 class FakeVisualProvider implements VisualProvider {
   readonly platform = "fake";
   private running = false;
   private onEvent: ((event: VisualEvent) => void) | null = null;
+  private onFrame: ((frame: ContinuousFrameSample) => void) | null = null;
 
   get isRunning() {
     return this.running;
   }
   getCapabilities(): VisualProviderCapabilities {
-    return { supported: true, windowEvents: true, uiAutomationEvents: true, uiAutomationQueries: true, onDemandFrameCapture: true };
+    return { supported: true, windowEvents: true, uiAutomationEvents: true, uiAutomationQueries: true, onDemandFrameCapture: true, continuousCapture: { supported: true, technology: "fake_continuous_capture", maxCaptureFps: null, supportsDirtyRects: true, supportsMultiDisplay: false } };
   }
   async start(onEvent: (event: VisualEvent) => void): Promise<void> {
     this.running = true;
@@ -52,6 +53,25 @@ class FakeVisualProvider implements VisualProvider {
   async focusUiElement() {}
   async captureFrame(): Promise<VisualFrame> {
     return { mimeType: "image/png", base64: "SECRET_SCREEN_PIXELS", region: null, capturedAt: new Date().toISOString() };
+  }
+  async startContinuousCapture(_options: unknown, onFrame: (frame: ContinuousFrameSample) => void): Promise<void> {
+    this.onFrame = onFrame;
+  }
+  async stopContinuousCapture(): Promise<void> {
+    this.onFrame = null;
+  }
+  emitFrame(overrides: Partial<ContinuousFrameSample> = {}): void {
+    this.onFrame?.({
+      sequence: 1,
+      atMs: Date.now(),
+      displayId: "0",
+      width: 1920,
+      height: 1080,
+      changedRegions: [],
+      changeScore: 0.95,
+      frame: { mimeType: "image/png", base64: "SECRET_SCREEN_PIXELS", region: null, capturedAt: new Date().toISOString() },
+      ...overrides,
+    });
   }
 }
 
@@ -142,9 +162,7 @@ describe("local perception is independent of any AI provider", () => {
 
   it("keeps perceiving when the transport throws on every frame", async () => {
     const provider = new FakeVisualProvider();
-    const engine = new VisualPerceptionEngine("throwing-transport-user", provider, {
-      keyframePolicy: { enabled: true, minAttentionScore: 0, minIntervalMs: 0 },
-    });
+    const engine = new VisualPerceptionEngine("throwing-transport-user", provider);
     await engine.start();
 
     engine.subscribe(() => {
@@ -155,16 +173,19 @@ describe("local perception is independent of any AI provider", () => {
     expect(engine.queryHistory()).toHaveLength(1);
   });
 
-  it("survives the visual provider failing to capture without losing the structural record", async () => {
+  it("degrades to structural-only, without crashing, when continuous capture fails to start at runtime", async () => {
     const provider = new FakeVisualProvider();
-    provider.captureFrame = async () => {
-      throw new Error("display unavailable");
+    provider.startContinuousCapture = async () => {
+      throw new Error("no GPU adapter");
     };
     const engine = new VisualPerceptionEngine("capture-fail-user", provider, {
-      keyframePolicy: { enabled: true, minAttentionScore: 0, minIntervalMs: 0 },
+      continuousCapturePolicy: { enabled: true },
     });
-    await engine.start();
 
+    await expect(engine.start()).resolves.toBeUndefined();
+    expect(engine.isCapturingContinuously).toBe(false);
+
+    // Structural perception is entirely unaffected by the failed capture attempt.
     provider.emit(makeEvent());
     await vi.waitFor(() => expect(engine.queryHistory()).toHaveLength(1));
     expect(engine.queryHistory()[0].frame).toBeNull();
@@ -224,7 +245,7 @@ describe("no raw visual data is persisted", () => {
     await updateUserSettings(userId, { eyesEnabled: true, eyesMode: "structural_plus_visual", eyesAllowedProviders: ["anthropic"] });
     const engine = await eyesService.ensureStarted(userId);
 
-    fake.emit(makeEvent({ significance: 0.95 }));
+    fake.emitFrame();
     await vi.waitFor(() => expect(engine.queryHistory()[0]?.frame).not.toBeNull());
 
     // The frame exists in memory...
@@ -255,14 +276,18 @@ describe("no raw visual data is persisted", () => {
     expect(engine.getHistory().getLimits().maxFrames).toBe(3);
   });
 
-  it("keyframe capture stays off unless the user explicitly chose structural_plus_visual", async () => {
+  it("continuous capture stays off unless the user explicitly chose structural_plus_visual", async () => {
     const fake = new FakeVisualProvider();
     __setVisualProviderForTesting(fake);
     const userId = await makeUser();
-    await updateUserSettings(userId, { eyesEnabled: true }); // default eyesMode
+    await updateUserSettings(userId, { eyesEnabled: true }); // default eyesMode: structural_only
     const engine = await eyesService.ensureStarted(userId);
 
-    expect(engine.getKeyframePolicy().enabled).toBe(false);
+    expect(engine.getContinuousCapturePolicy().enabled).toBe(false);
+    expect(engine.isCapturingContinuously).toBe(false);
+
+    // Structural events still work identically — this setting only ever
+    // gates pixels, never structural/UI-Automation awareness.
     fake.emit(makeEvent({ significance: 0.99 }));
     await vi.waitFor(() => expect(engine.queryHistory()).toHaveLength(1));
     expect(engine.queryHistory()[0].frame).toBeNull();
