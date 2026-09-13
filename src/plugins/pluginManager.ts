@@ -21,6 +21,13 @@ const pluginModuleSchema = z.object({
   capabilities: z.array(z.string()).optional(),
 });
 
+// Which tool names came from which plugin, so disabling one plugin can
+// unregister exactly its own tools rather than every plugin-sourced tool
+// in the registry. ToolDefinition itself carries no plugin identity (the
+// registry is deliberately source-agnostic — Section 15), so this
+// association has to live here, at the one place that actually knows it.
+const toolNamesByPlugin = new Map<string, string[]>();
+
 export async function loadPlugin(absoluteOrRelativePath: string): Promise<{ name: string; toolsRegistered: number }> {
   const resolved = path.resolve(absoluteOrRelativePath);
   const moduleUrl = pathToFileURL(resolved).href;
@@ -32,9 +39,20 @@ export async function loadPlugin(absoluteOrRelativePath: string): Promise<{ name
     throw new ValidationError(`Plugin at "${absoluteOrRelativePath}" exported no tools.`);
   }
 
+  // Reloading an existing plugin (e.g. after an update) must not leave
+  // its previous tool set registered under names the new version no
+  // longer exports.
+  for (const staleName of toolNamesByPlugin.get(metadata.name) ?? []) {
+    toolRegistry.unregister(staleName);
+  }
+
   for (const tool of tools) {
     toolRegistry.register({ ...tool, source: "plugin" });
   }
+  toolNamesByPlugin.set(
+    metadata.name,
+    tools.map((t) => t.name),
+  );
 
   await prisma.plugin.upsert({
     where: { name: metadata.name },
@@ -58,7 +76,12 @@ export async function listPlugins() {
 
 export async function disablePlugin(name: string): Promise<void> {
   await prisma.plugin.update({ where: { name }, data: { enabled: false } });
-  for (const tool of toolRegistry.listBySource("plugin")) {
-    toolRegistry.unregister(tool.name);
+  // Unregister only this plugin's own tools. The previous version of this
+  // function unregistered every plugin-sourced tool in the registry
+  // regardless of which plugin it belonged to — disabling one plugin
+  // would silently break every other loaded plugin's tools too.
+  for (const toolName of toolNamesByPlugin.get(name) ?? []) {
+    toolRegistry.unregister(toolName);
   }
+  toolNamesByPlugin.delete(name);
 }
