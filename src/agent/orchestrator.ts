@@ -3,7 +3,8 @@ import { env } from "../config/env.js";
 import { eventBus } from "../events/eventBus.js";
 import { childLogger } from "../config/logger.js";
 import { getProvider } from "../ai/router.js";
-import type { ChatMessage, ChatRequest } from "../ai/types.js";
+import type { AIProvider, ChatMessage, ChatRequest, ChatResponse } from "../ai/types.js";
+import { ProviderError } from "../utils/errors.js";
 import { toolRegistry } from "../tools/registry.js";
 import { resolveEffectivePermissions } from "../tools/permissionResolution.js";
 import { hasPermission } from "../security/permissionService.js";
@@ -26,6 +27,43 @@ export interface RunAgentInput {
   model: string;
   userMessage: string;
   taskId?: string;
+  /** When true, text deltas are emitted as "message.delta" events on the
+   *  event bus as the model generates them (Section 14: streaming
+   *  conversation), instead of only the final text once the turn
+   *  completes. Tool-call handling, permissions, and approvals are
+   *  unaffected either way — this only changes how the model's own text
+   *  reaches listeners. */
+  stream?: boolean;
+}
+
+// Consumes either provider.chat() or provider.chatStream() behind one
+// return shape, so the rest of the loop (tool handling, persistence) never
+// needs to know which path produced the response. Streaming is skipped
+// automatically if the model doesn't support it, rather than erroring.
+async function getModelResponse(
+  provider: AIProvider,
+  request: ChatRequest,
+  opts: { stream: boolean; agentRunId: string; userId: string },
+): Promise<ChatResponse> {
+  if (!opts.stream || !provider.getCapabilities(request.model).streaming) {
+    return provider.chat(request);
+  }
+
+  let finalResponse: ChatResponse | undefined;
+  for await (const event of provider.chatStream(request)) {
+    if (event.type === "text_delta") {
+      eventBus.emitEvent("message.delta", { agentRunId: opts.agentRunId, delta: event.delta }, opts.userId);
+    } else if (event.type === "done") {
+      finalResponse = event.response;
+    } else if (event.type === "error") {
+      throw new ProviderError(event.message, event.recoverable);
+    }
+  }
+
+  if (!finalResponse) {
+    throw new ProviderError("Streaming response ended without a completion event.", true);
+  }
+  return finalResponse;
 }
 
 export interface RunAgentOutcome {
@@ -119,7 +157,11 @@ async function executeLoop(
       signal,
     };
 
-    const response = await provider.chat(request);
+    const response = await getModelResponse(provider, request, {
+      stream: Boolean(input.stream),
+      agentRunId,
+      userId: input.userId,
+    });
 
     if (response.toolCalls.length === 0) {
       await appendMessage(input.conversationId, "assistant", response.content, {

@@ -35,6 +35,37 @@ model User {
   notifications Notification[]
   scheduledTasks ScheduledTask[]
   credentials   Credential[]
+  settings      UserSettings?
+}
+
+// Persistent, user-controlled assistant identity, voice, and activation
+// configuration (Jarvis spec sections 11/12/28/29). One row per user.
+// Deliberately explicit columns rather than a JSON blob so each setting
+// has a real default and can be queried/validated individually.
+model UserSettings {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Identity (Section 12)
+  assistantName String @default("Jarvis")
+
+  // Activation (Section 11/87) — activation is independent of AI model
+  // and voice-mode selection; it only ever means "begin interaction."
+  activationMode  String @default("push_to_talk") // push_to_talk | wake_word | clap | disabled
+  wakeWordPhrase  String @default("Jarvis")
+  clapSensitivity Float  @default(3.0)
+  clapPattern     String @default("double") // single | double | triple
+  clapCooldownMs  Int    @default(1500)
+
+  // Voice (Section 28/29/88) — provider selection is explicit and
+  // independent of the AI model.
+  voiceProvider String  @default("elevenlabs")
+  voiceId       String?
+  voiceModel    String?
+  sttProvider   String  @default("elevenlabs")
+
+  updatedAt DateTime @updatedAt
 }
 
 model Session {

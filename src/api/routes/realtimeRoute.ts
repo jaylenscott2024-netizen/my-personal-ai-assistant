@@ -3,6 +3,7 @@ import { verifyAccessToken } from "../../auth/tokens.js";
 import { isSessionActive } from "../../auth/authService.js";
 import { realtimeGateway } from "../../realtime/gateway.js";
 import { activationManager } from "../../activation/activationManager.js";
+import { getUserSettings } from "../../settings/userSettingsService.js";
 import { childLogger } from "../../config/logger.js";
 
 const log = childLogger("ws");
@@ -30,6 +31,17 @@ export async function realtimeRoute(app: FastifyInstance): Promise<void> {
     }
 
     realtimeGateway.register(userId, socket);
+
+    // Section 11: activation settings are persistent — hydrate the live
+    // in-memory activation config from the database on first connection
+    // per process, rather than the pre-restart behavior of always
+    // starting from hard-coded defaults. `feedAudioChunk` below must stay
+    // synchronous (it runs on every audio frame), so this is the one
+    // place per connection where we pay for the DB read.
+    if (!activationManager.isHydrated(userId)) {
+      activationManager.hydrate(userId, await getUserSettings(userId));
+    }
+
     socket.send(JSON.stringify({ kind: "connected", userId }));
 
     socket.on("message", (raw: Buffer, isBinary: boolean) => {

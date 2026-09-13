@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { ClapDetector, type ClapDetectorConfig } from "./clapDetector.js";
 import { eventBus } from "../events/eventBus.js";
+import type { ActivationMode, UserSettings } from "../settings/userSettingsService.js";
 
 // Section 31/32/87: Activation subsystem. Strictly separate from AI model
 // selection and voice-mode selection (Section 87) — an activation event
@@ -11,31 +12,78 @@ export interface WakeWordConfig {
 }
 
 export interface ActivationConfig {
+  mode: ActivationMode;
   wakeWord: WakeWordConfig;
   clap: ClapDetectorConfig;
 }
 
 export const DEFAULT_ACTIVATION_CONFIG: ActivationConfig = {
-  wakeWord: { enabled: false, phrase: "Hey Voltic" },
-  clap: { enabled: true, sensitivity: 3.0, pattern: "double", cooldownMs: 1500, sampleRate: 16_000 },
+  mode: "push_to_talk",
+  wakeWord: { enabled: false, phrase: "Jarvis" },
+  clap: { enabled: false, sensitivity: 3.0, pattern: "double", cooldownMs: 1500, sampleRate: 16_000 },
 };
+
+// Maps the persisted, user-facing settings shape (Section 11: "Make
+// activation settings persistent") onto the runtime config this manager
+// actually evaluates against every audio chunk / wake-word event. Kept as
+// a pure function so it's trivially testable without a database.
+export function activationConfigFromSettings(settings: UserSettings): ActivationConfig {
+  return {
+    mode: settings.activationMode,
+    wakeWord: {
+      enabled: settings.activationMode === "wake_word",
+      phrase: settings.wakeWordPhrase,
+    },
+    clap: {
+      enabled: settings.activationMode === "clap",
+      sensitivity: settings.clapSensitivity,
+      pattern: settings.clapPattern,
+      cooldownMs: settings.clapCooldownMs,
+      sampleRate: 16_000,
+    },
+  };
+}
 
 class ActivationManager extends EventEmitter {
   private configs = new Map<string, ActivationConfig>();
   private clapDetectors = new Map<string, ClapDetector>();
+  private hydrated = new Set<string>();
 
   getConfig(userId: string): ActivationConfig {
     return this.configs.get(userId) ?? DEFAULT_ACTIVATION_CONFIG;
   }
 
+  /** True once this user's config has been loaded from persisted settings
+   *  at least once in this process — lets callers (e.g. the WebSocket
+   *  route) avoid a redundant DB read on every reconnect. */
+  isHydrated(userId: string): boolean {
+    return this.hydrated.has(userId);
+  }
+
+  /** Loads a user's persisted settings into the live in-memory config.
+   *  Called once per user per process (typically on their first
+   *  WebSocket connection) rather than on every audio chunk, since
+   *  `feedAudioChunk` must stay synchronous to keep up with a live audio
+   *  stream — see settings/userSettingsService.ts for the DB-backed
+   *  persistence this hydrates from. */
+  hydrate(userId: string, settings: UserSettings): ActivationConfig {
+    const config = activationConfigFromSettings(settings);
+    this.configs.set(userId, config);
+    this.clapDetectors.get(userId)?.updateConfig(config.clap);
+    this.hydrated.add(userId);
+    return config;
+  }
+
   setConfig(userId: string, config: Partial<ActivationConfig>): ActivationConfig {
     const current = this.getConfig(userId);
     const merged: ActivationConfig = {
+      mode: config.mode ?? current.mode,
       wakeWord: { ...current.wakeWord, ...config.wakeWord },
       clap: { ...current.clap, ...config.clap },
     };
     this.configs.set(userId, merged);
     this.clapDetectors.get(userId)?.updateConfig(merged.clap);
+    this.hydrated.add(userId);
     return merged;
   }
 

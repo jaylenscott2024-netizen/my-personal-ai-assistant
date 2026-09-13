@@ -8,7 +8,24 @@ export const PERMISSIONS = [
   "filesystem.delete",
   "browser.read",
   "browser.interact",
+  // Desktop/computer control (Section 3/8 of the Jarvis computer-control
+  // spec). Deliberately split by risk tier rather than one blanket
+  // "computer.control" permission, mirroring how filesystem/browser are
+  // already split:
+  //   computer.read     - list apps/windows, read screen/screenshot (LOW)
+  //   computer.control   - open/close/focus an application (MEDIUM)
+  //   computer.input     - keyboard/mouse control (MEDIUM)
+  //   computer.files.*   - desktop file operations, unscoped from the
+  //                        sandboxed filesystem tool's workspace root
+  //   computer.execute   - run an arbitrary shell command (CRITICAL,
+  //                        always allowlisted + approved, never bare)
+  "computer.read",
   "computer.control",
+  "computer.input",
+  "computer.files.read",
+  "computer.files.write",
+  "computer.files.delete",
+  "computer.execute",
   "email.read",
   "email.send",
   "calendar.read",
@@ -29,13 +46,14 @@ export type AccessLevel = "read" | "write" | "execute" | "delete" | "send" | "pu
 // Maps a permission to the access level it represents, used purely for
 // risk-scoring in the approval engine (Section 17/18).
 export function accessLevelOf(permission: Permission): AccessLevel {
+  if (permission === "computer.execute") return "admin"; // arbitrary command execution is as risky as admin
   if (permission.endsWith(".write")) return "write";
   if (permission.endsWith(".delete")) return "delete";
   if (permission.endsWith(".send")) return "send";
   if (permission === "phone.call") return "call";
-  if (permission === "browser.interact" || permission === "computer.control") return "execute";
+  if (permission === "browser.interact" || permission === "computer.control" || permission === "computer.input") return "execute";
   if (permission === "admin") return "admin";
-  return "read";
+  return "read"; // covers filesystem.read, browser.read, computer.read, computer.files.read, network.fetch, *.read
 }
 
 export function isPermission(value: string): value is Permission {
