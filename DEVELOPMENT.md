@@ -54,6 +54,7 @@ src/
   conversation/  conversation + message persistence
   database/      Prisma client singleton
   events/        typed event bus
+  eyes/          Jarvis Eyes visual-perception engine, attention management, Windows UI Automation/watcher, provider-neutral visual context adapter
   integrations/  GitHub, Shopify, email, Twilio, Google Calendar clients
   mcp/           MCP client manager
   memory/        memory CRUD + relevance-scored retrieval
@@ -70,10 +71,10 @@ tests/           vitest suite (mirrors src/ layout roughly)
 prisma/          schema + migrations
 ```
 
-See also VOICE.md (realtime speech-to-speech pipeline) and
-COMPUTER_CONTROL.md (cross-platform desktop control) for deep dives into
-those two subsystems, including exactly what's verified in this sandbox
-versus what needs real hardware.
+See also VOICE.md (realtime speech-to-speech pipeline), COMPUTER_CONTROL.md
+(cross-platform desktop control), and EYES.md (visual perception + Windows
+UI Automation) for deep dives into those subsystems, including exactly
+what's verified in this sandbox versus what needs real hardware.
 
 ## Database
 
@@ -158,6 +159,12 @@ change.
   in. See COMPUTER_CONTROL.md, including how to run the backend on your
   own Windows/macOS/Linux machine so computer control actually controls
   *your* desktop.
+- **Jarvis Eyes**: `PATCH /settings/eyes {"eyesEnabled": true}` on a
+  Windows host running this backend starts real event-driven visual
+  perception; every other platform reports `NotConfiguredError`
+  honestly instead of a fake fallback. No AI provider receives any
+  visual data until it's added to `eyesAllowedProviders` in the same
+  settings call. See EYES.md.
 
 Anything left unset reports `not_configured` via `/health` and
 `/integrations` rather than silently pretending to work.
@@ -180,10 +187,11 @@ before relying on it in production.
 ## Known limitations to design around
 
 See PROJECT_REQUIREMENTS.md's "Explicit non-goals" section, and VOICE.md/
-COMPUTER_CONTROL.md for the detailed per-feature breakdown — Windows/
-macOS computer control and any keyboard/mouse/screenshot automation are
-real, standard code paths that this headless Linux sandbox can't execute
-to verify; OAuth consent flows, wake-word DSP, a Windows mouse-click
-native shim, and plugin sandboxing are architected but not fully
-implemented, each for a specific documented reason rather than being
-simply unfinished.
+COMPUTER_CONTROL.md/EYES.md for the detailed per-feature breakdown —
+Windows/macOS computer control and any keyboard/mouse/screenshot
+automation are real, standard code paths that this headless Linux
+sandbox can't execute to verify; OAuth consent flows, wake-word DSP, a
+Windows mouse-click native shim, plugin sandboxing, and the entire
+Windows Eyes/UI-Automation watcher process are architected but not fully
+verified in this environment, each for a specific documented reason
+rather than being simply unfinished.

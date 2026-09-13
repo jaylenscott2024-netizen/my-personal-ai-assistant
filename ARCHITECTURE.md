@@ -147,6 +147,23 @@ boundary Section 9 of the build spec asks a Tauri bridge to provide — it's
 just enforced one layer down, in the backend, rather than in a
 renderer-to-native bridge that doesn't exist yet.
 
+## Jarvis Eyes (visual perception)
+
+See EYES.md for the full picture — summary: a persistent, event-driven
+`VisualPerceptionEngine` (`src/eyes/*`) maintains a continuously-updated
+`VisualState` from real OS events (Win32 `SetWinEventHook` + UI Automation
+event handlers on Windows via a long-lived PowerShell/.NET helper
+process; `UnsupportedVisualProvider` honestly on every other platform) —
+never a screenshot-polling loop. `AttentionManager` scores significance
+and throttles redundant events so the model never gets flooded.
+`VisualContextAdapter` renders an ambient text summary into the system
+prompt, and `eyes_get_visual_state` / `computer_*_ui_*` tools expose it
+on demand — both gated by settings, permissions, and (for any pixel data)
+an explicit per-provider allowlist, entirely independent of which AI
+model is configured. UI Automation (semantic control data — buttons,
+fields, automation ids) is a related but distinct layer from Eyes itself;
+EYES.md explains the difference in full.
+
 ## Data model
 
 See `prisma/schema.prisma` for the full schema. Highlights:
@@ -173,9 +190,11 @@ See `prisma/schema.prisma` for the full schema. Highlights:
   operational state for external services, cron-driven automation, the
   audit/activity stream, and delivered notifications.
 - `UserSettings` — the assistant's configurable identity (name, default
-  "Jarvis"), activation mode and tuning, and voice provider/voice/model
-  selection. One row per user, replacing what used to be in-memory-only
-  activation config that reset on every restart.
+  "Jarvis"), activation mode and tuning, voice provider/voice/model
+  selection, and Jarvis Eyes configuration (enabled flag, mode, attention
+  mode, latency policy, allowed-providers list — see EYES.md). One row
+  per user, replacing what used to be in-memory-only activation config
+  that reset on every restart.
 
 ## Event bus and real-time transport
 
@@ -237,6 +256,8 @@ no such host here), keyboard/mouse/screenshot on any platform (needs a
 live display server this sandbox lacks), a live ElevenLabs API key's
 actual audio, OAuth consent UI for Google Calendar (uses a pre-obtained
 refresh token instead), wake-word DSP (by design — client-side, per
-Section 87), and plugin sandboxing (dynamic import with no process
-isolation yet). See VOICE.md and COMPUTER_CONTROL.md for the detailed,
+Section 87), plugin sandboxing (dynamic import with no process
+isolation yet), and the entire Windows Eyes/UI-Automation watcher process
+(standards-based PowerShell/.NET code, unexecuted — no Windows host
+here). See VOICE.md, COMPUTER_CONTROL.md, and EYES.md for the detailed,
 per-feature breakdown of what's tested versus what needs real hardware.

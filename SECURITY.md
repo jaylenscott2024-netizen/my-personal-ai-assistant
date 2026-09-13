@@ -45,8 +45,9 @@ Everything below exists to enforce one of those three.
 - `security/permissions.ts` defines a fixed catalog of permission strings
   (`filesystem.read/write/delete`, `browser.read/interact`,
   `computer.read/control/input/files.read/files.write/files.delete/execute`,
-  `email.read/send`, `calendar.read/write`, `shopify.read/write`,
-  `github.read/write`, `phone.call`, `network.fetch`, `admin`).
+  `computer.eyes.read/capture` (Jarvis Eyes — see EYES.md), `email.read/send`,
+  `calendar.read/write`, `shopify.read/write`, `github.read/write`,
+  `phone.call`, `network.fetch`, `admin`).
 - Every tool declares the permissions it needs. Some tools' real risk
   depends on the specific call (`filesystem` read vs. delete, `browser`
   read vs. click/type) — `tools/permissionResolution.ts` computes the
@@ -149,6 +150,43 @@ extra layers beyond the standard permission/approval gate:
   `C:\Program Files`, `/System`, `/Library`, and similar — rather than
   restricting to one allowed root, since a real desktop assistant needs
   to reach the user's actual Downloads/Desktop/Documents folders.
+
+## Jarvis Eyes: visual data is treated as maximally sensitive
+
+Full detail in EYES.md; the security-relevant points:
+
+- **Two separate, differently-scored permissions**: `computer.eyes.read`
+  (structural/event awareness — window titles, UI Automation data, no
+  pixels) scores LOW like other read operations; `computer.eyes.capture`
+  (actual on-demand pixel frame capture) scores as HIGH (`"delete"`
+  tier) — because a screen can show literally anything (a password
+  manager, private messages, financial data), it is deliberately not
+  treated as a routine read.
+- **No provider gets visual data by default**: `eyesAllowedProviders` is
+  empty out of the box. Neither the ambient system-prompt summary
+  (`VisualContextAdapter`) nor a tool-attached frame
+  (`eyes_get_visual_state`) reaches a given AI provider unless that
+  provider's id is explicitly added to this list — checked fresh on
+  every turn in `agent/orchestrator.ts`, not cached.
+- **Capability-gated, never forced**: an image is only ever forwarded to
+  a model whose `ModelCapabilities.vision` is true for the model actually
+  in use that turn; a non-vision model simply never receives one, rather
+  than receiving unusable data or the request silently degrading in some
+  other way.
+- **No retention by default**: `VisualState` lives only in server memory
+  for the life of the process; a captured frame lives only in memory for
+  the current agent turn (`ChatMessage.images`) and is never handed to
+  `conversationService.appendMessage`, so it never enters persisted
+  conversation history.
+- **The user can fully disable Eyes**: `eyesEnabled: false` (the default)
+  means the engine never starts and no OS-level event hooks are ever
+  registered — not merely "the model is told not to use it."
+- **No screenshot fallback**: if a platform can't support the real
+  event-driven implementation, every `VisualProvider` method throws
+  `NotConfiguredError` with a specific reason. This is a security
+  property as much as an honesty one — a silent fallback to a screenshot
+  loop would be a much larger, much less visible attack surface (routine
+  full-screen capture) than the code ever actually implements.
 
 ## Realtime voice and streaming: no security shortcuts for speed
 

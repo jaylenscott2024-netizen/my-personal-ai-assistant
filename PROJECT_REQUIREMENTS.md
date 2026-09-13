@@ -52,15 +52,27 @@ unrelated, earlier "JARVIS" project the user previously had.
    allowlisted command runner, each tagged with the exact LOW/MEDIUM/
    HIGH/CRITICAL risk tier that determines whether it needs approval.
    See COMPUTER_CONTROL.md.
-8. **Real integrations, honestly scoped** — GitHub, Shopify, email,
+8. **Jarvis has an Eyes visual-perception subsystem, independent of the
+   selected AI model** — continuous, event-driven awareness of window/
+   focus/UI changes (never a screenshot-polling loop), with peripheral
+   vs. primary attention, throttled updates, and a capability-aware,
+   provider-neutral adapter that decides per-turn whether and how the
+   active AI model receives any of it. Screenshots are NOT the
+   computer-perception mechanism and are NOT used as an automatic
+   fallback — an unsupported platform reports that honestly instead.
+   Distinct from, and complementary to, Windows UI Automation (structured
+   semantic control data) and computer control (actually acting). Fully
+   user-disable-able, off by default, and no AI provider receives any
+   visual data until explicitly allowlisted. See EYES.md.
+9. **Real integrations, honestly scoped** — GitHub, Shopify, email,
    Google Calendar, and Twilio voice calling are implemented against
    their real APIs; anything not configured reports that plainly rather
    than faking success.
-9. **Security by default** — least-privilege permissions, encrypted
-   credential storage, audit logging, allowlisted command execution, and
-   explicit trust boundaries between system instructions, user
-   instructions, and external content (prompt-injection defense).
-10. **Observability and operability** — structured logs, health checks,
+10. **Security by default** — least-privilege permissions, encrypted
+    credential storage, audit logging, allowlisted command execution, and
+    explicit trust boundaries between system instructions, user
+    instructions, and external content (prompt-injection defense).
+11. **Observability and operability** — structured logs, health checks,
     an activity/event stream, streaming API transports (SSE + WebSocket),
     and a deployment path that isn't tied to one cloud provider.
 
@@ -97,6 +109,14 @@ the detailed, per-feature breakdown of exactly what's verified versus not:
 - **Full plugin sandboxing** — the plugin loader dynamically imports local
   ES modules; it does not yet sandbox/containerize third-party code
   (Section 69 flags this as a requirement before running untrusted code).
+- **Jarvis Eyes on macOS/Linux** — the visual-perception engine, attention
+  management, settings, and every tool are real and fully tested; only
+  Windows has a real `VisualProvider` implementation
+  (`WindowsVisualProvider`, standards-based PowerShell/.NET code against
+  Win32 `SetWinEventHook` and UI Automation, **not executed against a
+  real Windows host in this sandbox**). Every other platform reports
+  `NotConfiguredError` honestly rather than falling back to screenshots.
+  See EYES.md.
 
 ## Success criteria
 
