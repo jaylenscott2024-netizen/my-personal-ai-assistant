@@ -41,15 +41,20 @@ function defaultCaps(): ModelCapabilities {
 // Gemini's generateContent API uses `contents` with roles "user"/"model"
 // and represents tool results as `functionResponse` parts and tool
 // requests as `functionCall` parts.
-function toGeminiContents(req: ChatRequest) {
+export function toGeminiContents(req: ChatRequest) {
   const contents: Array<Record<string, unknown>> = [];
   for (const m of req.messages) {
     if (m.role === "system") continue;
     if (m.role === "tool") {
-      contents.push({
-        role: "user",
-        parts: [{ functionResponse: { name: m.toolCallId, response: { content: m.content } } }],
-      });
+      // Gemini allows additional parts (like inlineData) alongside a
+      // functionResponse part in the same "user"-role content entry, so an
+      // image attached to a tool result (e.g. an on-demand Eyes frame)
+      // rides in the same turn rather than needing a synthetic message.
+      const parts: unknown[] = [{ functionResponse: { name: m.toolCallId, response: { content: m.content } } }];
+      if (m.images?.length) {
+        for (const img of m.images) parts.push({ inlineData: { mimeType: img.mimeType, data: img.base64 } });
+      }
+      contents.push({ role: "user", parts });
       continue;
     }
     if (m.role === "assistant" && m.toolCalls?.length) {
@@ -62,7 +67,11 @@ function toGeminiContents(req: ChatRequest) {
       continue;
     }
     const text = m.untrusted ? `<external_content trust="untrusted">\n${m.content}\n</external_content>` : m.content;
-    contents.push({ role: m.role === "assistant" ? "model" : "user", parts: [{ text }] });
+    const parts: unknown[] = [{ text }];
+    if (m.images?.length) {
+      for (const img of m.images) parts.push({ inlineData: { mimeType: img.mimeType, data: img.base64 } });
+    }
+    contents.push({ role: m.role === "assistant" ? "model" : "user", parts });
   }
   return contents;
 }

@@ -14,5 +14,14 @@ export function resolveEffectivePermissions(toolName: string, input: Record<stri
   if (toolName === "browser" && typeof input.action === "string") {
     return [browserPermissionFor(input.action)];
   }
+  // eyes_get_visual_state's declared permission (computer.eyes.read) covers
+  // its always-on structural summary; actually capturing a pixel frame is a
+  // fundamentally higher-risk operation (Section: pixel capture can contain
+  // anything on screen), so the stricter computer.eyes.capture permission —
+  // and the approval it triggers via riskLevelForPermissions — only applies
+  // when the caller actually asked for includeVisual.
+  if (toolName === "eyes_get_visual_state" && input.includeVisual === true) {
+    return [...declared, "computer.eyes.capture"];
+  }
   return declared;
 }

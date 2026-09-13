@@ -13,6 +13,7 @@ import { requestApproval, waitForApprovalResolution } from "../approvals/approva
 import { audit } from "../security/audit.js";
 import { assembleSystemPrompt } from "../context/instructions.js";
 import { getUserSettings } from "../settings/userSettingsService.js";
+import { getVisualContextForModel } from "../eyes/visualContextAdapter.js";
 import { retrieveRelevantMemory } from "../memory/memoryService.js";
 import { appendMessage, getHistory } from "../conversation/conversationService.js";
 import { registerCancellation, clearCancellation } from "../tasks/taskService.js";
@@ -134,10 +135,17 @@ async function executeLoop(
     getUserSettings(input.userId),
   ]);
   const memorySummary = memories.map((m) => `- (${m.category}) ${m.content}`).join("\n");
+  const visualContext = await getVisualContextForModel({
+    userId: input.userId,
+    role: input.role,
+    providerId: input.providerId,
+    settings,
+  });
 
   const systemPrompt = assembleSystemPrompt({
     assistantName: settings.assistantName,
     userPreferencesSummary: memorySummary || undefined,
+    visualContext,
   });
 
   const history = await getHistory(input.conversationId, 60);
@@ -215,11 +223,21 @@ async function executeLoop(
         return { status: "waiting_for_approval", agentRunId, approvalId: outcome.approvalId };
       }
 
+      // Section 25/27: images are only ever forwarded when (a) the active
+      // model's capabilities actually declare vision support, AND (b) the
+      // active provider is one the user has explicitly opted in to receive
+      // ANY visual data (eyesAllowedProviders — empty by default). A tool
+      // (e.g. Eyes) stays entirely provider-agnostic and just reports what
+      // it captured; this is the one place that decides whether it's
+      // actually allowed to reach the model this turn.
+      const vision = provider.getCapabilities(input.model).vision;
+      const providerAllowedForVisual = settings.eyesAllowedProviders.includes(input.providerId);
       const toolMessage: ChatMessage = {
         role: "tool",
         content: outcome.contentForModel,
         toolCallId: call.id,
         untrusted: outcome.untrusted,
+        images: vision && providerAllowedForVisual ? outcome.images : undefined,
       };
       messages.push(toolMessage);
       await appendMessage(input.conversationId, "tool", outcome.contentForModel, { toolCallId: call.id });
@@ -232,6 +250,9 @@ interface ToolCallOutcome {
   contentForModel: string;
   untrusted?: boolean;
   approvalId?: string;
+  /** Carried straight from ToolExecutionResult.images — never persisted;
+   *  executeLoop decides whether the active model can actually use it. */
+  images?: Array<{ mimeType: string; base64: string }>;
 }
 
 async function executeToolCall(
@@ -316,7 +337,7 @@ async function executeToolCall(
     });
     audit({ userId: input.userId, action: "tool.executed", resource: call.name, outcome: "allowed" });
     eventBus.emitEvent("tool.completed", { agentRunId, toolCallId: record.id, tool: call.name }, input.userId);
-    return { status: "executed", contentForModel: JSON.stringify(result.output), untrusted: result.untrusted };
+    return { status: "executed", contentForModel: JSON.stringify(result.output), untrusted: result.untrusted, images: result.images };
   } catch (err) {
     const message = (err as Error).message;
     await prisma.toolCallRecord.update({ where: { id: record.id }, data: { status: "failed", error: message, finishedAt: new Date() } });

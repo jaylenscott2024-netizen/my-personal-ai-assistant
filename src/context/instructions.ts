@@ -30,11 +30,19 @@ export interface InstructionContext {
   userPreferencesSummary?: string;
   taskInstructions?: string;
   providerRequirements?: string;
+  /** Pre-rendered ambient visual-awareness summary from the Eyes
+   *  subsystem (eyes/visualContextAdapter.ts) — already wrapped as
+   *  untrusted external content by the adapter itself, so it's inserted
+   *  verbatim here rather than re-wrapped. Undefined whenever Eyes has
+   *  nothing to contribute this turn (disabled, no permission, provider
+   *  not allowlisted, or no observation yet). */
+  visualContext?: string;
 }
 
 export function assembleSystemPrompt(ctx: InstructionContext): string {
   const sections = [coreAssistantInstructions(ctx.assistantName ?? "Jarvis"), SAFETY_POLICY];
   if (ctx.userPreferencesSummary) sections.push(`User preferences:\n${ctx.userPreferencesSummary}`);
+  if (ctx.visualContext) sections.push(ctx.visualContext);
   if (ctx.taskInstructions) sections.push(`Current task instructions:\n${ctx.taskInstructions}`);
   if (ctx.providerRequirements) sections.push(ctx.providerRequirements);
   return sections.join("\n\n");

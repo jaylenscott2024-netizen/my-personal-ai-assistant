@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAuth } from "../../auth/middleware.js";
 import { activationManager } from "../../activation/activationManager.js";
 import { getUserSettings, updateUserSettings } from "../../settings/userSettingsService.js";
+import { eyesService } from "../../eyes/eyesService.js";
 
 const activationUpdateSchema = z.object({
   activationMode: z.enum(["push_to_talk", "wake_word", "clap", "disabled"]).optional(),
@@ -21,6 +22,16 @@ const voiceUpdateSchema = z.object({
 
 const identityUpdateSchema = z.object({
   assistantName: z.string().min(1).max(64).optional(),
+});
+
+const eyesUpdateSchema = z.object({
+  eyesEnabled: z.boolean().optional(),
+  eyesMode: z.enum(["structural_only", "structural_plus_visual"]).optional(),
+  eyesAttentionMode: z.enum(["auto", "manual"]).optional(),
+  eyesUpdateLatencyPolicy: z.enum(["realtime", "balanced", "low_power"]).optional(),
+  /** AI provider ids allowed to receive ANY visual context — empty by
+   *  default, so no provider gets it until explicitly opted in here. */
+  eyesAllowedProviders: z.array(z.string()).optional(),
 });
 
 // Section 11/12/28/29/87/88: activation, voice, and identity settings are
@@ -58,6 +69,40 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   app.patch("/settings/identity", async (request, reply) => {
     const body = identityUpdateSchema.parse(request.body);
     reply.send(await updateUserSettings(request.user!.id, body));
+  });
+
+  app.get("/settings/eyes", async (request, reply) => {
+    reply.send(await getUserSettings(request.user!.id));
+  });
+
+  // Section 27/28: this is where a settings change actually takes effect —
+  // enabling Eyes starts the engine right away (surfacing a platform's
+  // "not supported" honestly instead of silently leaving eyesEnabled=true
+  // with nothing actually running), disabling it stops the engine, and a
+  // latency-policy change is pushed into any already-running engine.
+  app.patch("/settings/eyes", async (request, reply) => {
+    const body = eyesUpdateSchema.parse(request.body);
+    await updateUserSettings(request.user!.id, body);
+
+    if (body.eyesEnabled === true) {
+      try {
+        await eyesService.ensureStarted(request.user!.id);
+      } catch (err) {
+        // Never leave eyesEnabled persisted as true when it never actually
+        // started (Section: "report the limitation clearly" — not a
+        // silent, misleading half-enabled state).
+        await updateUserSettings(request.user!.id, { eyesEnabled: false });
+        throw err;
+      }
+    } else if (body.eyesEnabled === false) {
+      await eyesService.stop(request.user!.id);
+    }
+
+    if (body.eyesUpdateLatencyPolicy) {
+      await eyesService.setLatencyPolicy(request.user!.id, body.eyesUpdateLatencyPolicy);
+    }
+
+    reply.send(await getUserSettings(request.user!.id));
   });
 
   app.post("/settings/activation/wake-word-detected", async (request, reply) => {

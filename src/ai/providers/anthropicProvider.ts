@@ -48,13 +48,23 @@ export function toAnthropicMessages(req: ChatRequest) {
   for (const m of req.messages) {
     if (m.role === "system") continue;
     if (m.role === "tool") {
+      // Anthropic's tool_result content accepts either a plain string or an
+      // array of blocks — an array is only needed when there's an image to
+      // attach (e.g. an on-demand Eyes frame), so the common no-image case
+      // keeps the original simple shape.
+      const resultContent = m.images?.length
+        ? [
+            { type: "text", text: m.content },
+            ...m.images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mimeType, data: img.base64 } })),
+          ]
+        : m.content;
       messages.push({
         role: "user",
         content: [
           {
             type: "tool_result",
             tool_use_id: m.toolCallId,
-            content: m.content,
+            content: resultContent,
           },
         ],
       });
@@ -73,7 +83,15 @@ export function toAnthropicMessages(req: ChatRequest) {
     // it from an instruction even if the transport doesn't have a
     // dedicated content type for it (Section 66).
     const text = m.untrusted ? `<external_content trust="untrusted">\n${m.content}\n</external_content>` : m.content;
-    messages.push({ role: m.role === "user" ? "user" : "assistant", content: text });
+    if (m.images?.length) {
+      const content: unknown[] = [
+        { type: "text", text },
+        ...m.images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mimeType, data: img.base64 } })),
+      ];
+      messages.push({ role: m.role === "user" ? "user" : "assistant", content });
+    } else {
+      messages.push({ role: m.role === "user" ? "user" : "assistant", content: text });
+    }
   }
   return messages;
 }

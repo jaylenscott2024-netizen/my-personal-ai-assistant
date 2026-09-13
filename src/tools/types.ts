@@ -17,6 +17,13 @@ export interface ToolExecutionResult {
   /** True when the tool's own output should be treated as untrusted
    *  external content when it re-enters the model's context (Section 66). */
   untrusted?: boolean;
+  /** Optional image attachments (e.g. an on-demand frame from the Eyes
+   *  subsystem's computer_* / eyes_* tools). Provider-neutral: the
+   *  orchestrator decides whether to actually forward these to the model
+   *  based on the active provider/model's vision capability, and they are
+   *  never written to persistent conversation history — in-memory for the
+   *  current turn only (Section: no visual-data retention by default). */
+  images?: Array<{ mimeType: string; base64: string }>;
 }
 
 export interface ToolDefinition<Input = unknown> {

@@ -32,6 +32,14 @@ export interface ChatMessage {
    *  still safe because context/promptAssembly.ts wraps it in explicit
    *  delimiters regardless. */
   untrusted?: boolean;
+  /** Optional image attachments (e.g. an on-demand frame captured by the
+   *  Eyes subsystem). Provider-neutral: each provider's message-conversion
+   *  function renders these into whatever vision content shape that API
+   *  expects. The orchestrator only sets this when the active model's
+   *  ModelCapabilities.vision is true — a non-vision model never sees it,
+   *  rather than receiving unusable base64-in-text noise. Never persisted
+   *  to the conversation history (in-memory for the current turn only). */
+  images?: Array<{ mimeType: string; base64: string }>;
 }
 
 export interface ModelCapabilities {

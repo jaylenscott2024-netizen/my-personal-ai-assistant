@@ -38,7 +38,7 @@ function defaultCaps(): ModelCapabilities {
   return cap(false, 128_000);
 }
 
-function toOpenAIMessages(req: ChatRequest) {
+export function toOpenAIMessages(req: ChatRequest) {
   const messages: Array<Record<string, unknown>> = [];
   if (req.systemPrompt) messages.push({ role: "system", content: req.systemPrompt });
 
@@ -46,7 +46,21 @@ function toOpenAIMessages(req: ChatRequest) {
     if (m.role === "system") {
       messages.push({ role: "system", content: m.content });
     } else if (m.role === "tool") {
+      // OpenAI's chat.completions "tool" role message content must be a
+      // plain string — image content parts are only valid on user/system
+      // messages. So an image attached to a tool result (e.g. an on-demand
+      // Eyes frame) rides in a synthetic follow-up user message instead of
+      // being dropped or sent in a shape the API would reject.
       messages.push({ role: "tool", tool_call_id: m.toolCallId, content: m.content });
+      if (m.images?.length) {
+        messages.push({
+          role: "user",
+          content: [
+            { type: "text", text: "Image attached to the preceding tool result:" },
+            ...m.images.map((img) => ({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.base64}` } })),
+          ],
+        });
+      }
     } else if (m.role === "assistant" && m.toolCalls?.length) {
       messages.push({
         role: "assistant",
@@ -59,7 +73,14 @@ function toOpenAIMessages(req: ChatRequest) {
       });
     } else {
       const text = m.untrusted ? `<external_content trust="untrusted">\n${m.content}\n</external_content>` : m.content;
-      messages.push({ role: m.role, content: text });
+      if (m.images?.length) {
+        messages.push({
+          role: m.role,
+          content: [{ type: "text", text }, ...m.images.map((img) => ({ type: "image_url", image_url: { url: `data:${img.mimeType};base64,${img.base64}` } }))],
+        });
+      } else {
+        messages.push({ role: m.role, content: text });
+      }
     }
   }
   return messages;
