@@ -12,6 +12,7 @@ import { riskLevelForPermissions } from "../security/permissions.js";
 import { requestApproval, waitForApprovalResolution } from "../approvals/approvalService.js";
 import { audit } from "../security/audit.js";
 import { assembleSystemPrompt } from "../context/instructions.js";
+import { getUserSettings } from "../settings/userSettingsService.js";
 import { retrieveRelevantMemory } from "../memory/memoryService.js";
 import { appendMessage, getHistory } from "../conversation/conversationService.js";
 import { registerCancellation, clearCancellation } from "../tasks/taskService.js";
@@ -128,10 +129,14 @@ async function executeLoop(
   signal: AbortSignal,
 ): Promise<RunAgentOutcome> {
   const startedAt = Date.now();
-  const memories = await retrieveRelevantMemory(input.userId, { query: input.userMessage });
+  const [memories, settings] = await Promise.all([
+    retrieveRelevantMemory(input.userId, { query: input.userMessage }),
+    getUserSettings(input.userId),
+  ]);
   const memorySummary = memories.map((m) => `- (${m.category}) ${m.content}`).join("\n");
 
   const systemPrompt = assembleSystemPrompt({
+    assistantName: settings.assistantName,
     userPreferencesSummary: memorySummary || undefined,
   });
 

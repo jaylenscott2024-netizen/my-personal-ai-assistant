@@ -3,7 +3,7 @@ import { registerUser } from "../src/auth/authService.js";
 import { createConversation } from "../src/conversation/conversationService.js";
 import { runAgent } from "../src/agent/orchestrator.js";
 import { registerBuiltinTools } from "../src/tools/builtinIndex.js";
-import { eventBus, type VolticEvent } from "../src/events/eventBus.js";
+import { eventBus, type AgentEvent } from "../src/events/eventBus.js";
 
 beforeAll(() => {
   registerBuiltinTools();
@@ -21,7 +21,7 @@ describe("agent orchestrator streaming (Section 14)", () => {
     const { userId, role, conversationId } = await makeUserAndConversation();
 
     const deltas: string[] = [];
-    const unsubscribe = eventBus.onEvent((event: VolticEvent) => {
+    const unsubscribe = eventBus.onEvent((event: AgentEvent) => {
       if (event.type === "message.delta" && event.userId === userId) {
         deltas.push((event.payload as { delta: string }).delta);
       }
@@ -47,7 +47,7 @@ describe("agent orchestrator streaming (Section 14)", () => {
     const { userId, role, conversationId } = await makeUserAndConversation();
 
     const deltas: string[] = [];
-    const unsubscribe = eventBus.onEvent((event: VolticEvent) => {
+    const unsubscribe = eventBus.onEvent((event: AgentEvent) => {
       if (event.type === "message.delta" && event.userId === userId) deltas.push("x");
     });
 

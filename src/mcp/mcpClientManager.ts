@@ -33,7 +33,7 @@ class McpClientManager {
       env: config.env,
     });
 
-    const client = new Client({ name: "voltic-lane-ai", version: "0.1.0" }, { capabilities: {} });
+    const client = new Client({ name: "jarvis", version: "0.1.0" }, { capabilities: {} });
     await client.connect(transport);
     this.clients.set(config.id, client);
 

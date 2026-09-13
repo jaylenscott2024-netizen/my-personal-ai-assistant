@@ -2,7 +2,7 @@ import { UtteranceSegmenter, pcm16ToWav, type VadConfig } from "./vad.js";
 import { getVoiceProvider } from "./voiceRegistry.js";
 import { runAgent } from "../agent/orchestrator.js";
 import { abortById } from "../tasks/taskService.js";
-import { eventBus, type VolticEvent } from "../events/eventBus.js";
+import { eventBus, type AgentEvent } from "../events/eventBus.js";
 import { childLogger } from "../config/logger.js";
 
 const log = childLogger("realtimeVoice");
@@ -171,7 +171,7 @@ export class RealtimeVoiceSession {
       queueRunning = false;
     };
 
-    const onDelta = (event: VolticEvent) => {
+    const onDelta = (event: AgentEvent) => {
       if (!isCurrent()) return;
       if (event.type !== "message.delta") return;
       const payload = event.payload as { agentRunId: string; delta: string };

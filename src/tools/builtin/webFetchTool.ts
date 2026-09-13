@@ -44,7 +44,7 @@ export const webFetchTool: ToolDefinition<z.infer<typeof inputSchema>> = {
 
     const res = await request(url, {
       method: "GET",
-      headers: { "user-agent": "VolticLaneAI/0.1 (+personal-assistant research tool)" },
+      headers: { "user-agent": "Jarvis/0.1 (+personal-assistant research tool)" },
       signal: ctx.signal,
       maxRedirections: 3,
     });

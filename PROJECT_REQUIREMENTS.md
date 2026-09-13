@@ -1,8 +1,8 @@
-# Voltic Lane AI — Project Requirements
+# Jarvis — Project Requirements
 
 ## What this is
 
-Voltic Lane AI is a personal AI assistant platform: a backend-first system
+Jarvis is a personal AI assistant platform: a backend-first system
 intended to grow into a digital employee that can hold conversations,
 remember context, execute multi-step tasks, control tools (browser,
 filesystem, business integrations), and eventually operate voice and
@@ -15,8 +15,10 @@ permissions, and task orchestration, so that any number of frontends
 (desktop, web, voice-only, CLI) can sit on top of it without duplicating
 logic.
 
-It is a clean-room build. It does not import, depend on, or migrate
-anything from a prior "JARVIS" project.
+It is a clean-room build. Despite sharing the "Jarvis" name (chosen for
+the user-facing assistant identity — see Section 12 of the original
+build spec), it does not import, depend on, or migrate anything from an
+unrelated, earlier "JARVIS" project the user previously had.
 
 ## Product requirements
 

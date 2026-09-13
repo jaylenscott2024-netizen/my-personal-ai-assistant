@@ -8,7 +8,7 @@ import { createConversation } from "../../conversation/conversationService.js";
 import { RealtimeVoiceSession } from "../../voice/realtimeSession.js";
 import { activationManager } from "../../activation/activationManager.js";
 import { ActivationGate } from "../../voice/activationGate.js";
-import { eventBus, type VolticEvent } from "../../events/eventBus.js";
+import { eventBus, type AgentEvent } from "../../events/eventBus.js";
 import { childLogger } from "../../config/logger.js";
 
 const log = childLogger("ws.voice");
@@ -105,7 +105,7 @@ export async function realtimeVoiceRoute(app: FastifyInstance): Promise<void> {
       onError: (message) => send({ kind: "error", message }),
     });
 
-    const unsubscribeActivation = eventBus.onEvent((event: VolticEvent) => {
+    const unsubscribeActivation = eventBus.onEvent((event: AgentEvent) => {
       if (event.type !== "activation.detected" || event.userId !== userId) return;
       gate.trigger();
       send({ kind: "activated", method: (event.payload as { method: string }).method });

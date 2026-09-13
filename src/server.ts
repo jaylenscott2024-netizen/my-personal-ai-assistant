@@ -12,7 +12,7 @@ async function main(): Promise<void> {
   logger.info({ restoredCount }, "restored scheduled tasks");
 
   await app.listen({ port: env.PORT, host: env.HOST });
-  logger.info({ port: env.PORT }, "Voltic Lane AI backend listening");
+  logger.info({ port: env.PORT }, "Jarvis backend listening");
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "shutting down");

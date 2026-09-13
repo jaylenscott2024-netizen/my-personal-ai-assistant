@@ -19,7 +19,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 4000
-      DATABASE_URL: file:/app/data/voltic.db
+      DATABASE_URL: file:/app/data/jarvis.db
       JWT_SECRET: ${JWT_SECRET:?set a real JWT_SECRET}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set a real CREDENTIAL_ENCRYPTION_KEY}
       DEFAULT_AI_PROVIDER: ${DEFAULT_AI_PROVIDER:-mock}

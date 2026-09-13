@@ -39,7 +39,7 @@ export const EVENT_TYPES = [
 
 export type EventType = (typeof EVENT_TYPES)[number];
 
-export interface VolticEvent<T = unknown> {
+export interface AgentEvent<T = unknown> {
   type: EventType;
   userId?: string;
   payload: T;
@@ -66,7 +66,7 @@ function stripSecrets(value: unknown): unknown {
 class EventBus extends EventEmitter {
   emitEvent<T>(type: EventType, payload: T, userId?: string): void {
     const sanitized = stripSecrets(payload);
-    const event: VolticEvent = { type, userId, payload: sanitized, at: new Date().toISOString() };
+    const event: AgentEvent = { type, userId, payload: sanitized, at: new Date().toISOString() };
     this.emit("event", event);
     this.emit(type, event);
 
@@ -83,7 +83,7 @@ class EventBus extends EventEmitter {
       .catch((err) => log.warn({ err, type }, "failed to persist activity event"));
   }
 
-  onEvent(handler: (event: VolticEvent) => void): () => void {
+  onEvent(handler: (event: AgentEvent) => void): () => void {
     this.on("event", handler);
     return () => this.off("event", handler);
   }

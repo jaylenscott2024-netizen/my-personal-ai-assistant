@@ -1,5 +1,5 @@
 import type { WebSocket } from "ws";
-import { eventBus, type VolticEvent } from "../events/eventBus.js";
+import { eventBus, type AgentEvent } from "../events/eventBus.js";
 import { childLogger } from "../config/logger.js";
 
 const log = childLogger("realtime");
@@ -25,7 +25,7 @@ class RealtimeGateway {
     });
   }
 
-  private broadcastToUser(event: VolticEvent): void {
+  private broadcastToUser(event: AgentEvent): void {
     if (!event.userId) return;
     const sockets = this.connectionsByUser.get(event.userId);
     if (!sockets) return;

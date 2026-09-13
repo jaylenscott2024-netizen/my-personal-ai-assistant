@@ -11,7 +11,7 @@ import { runAgent, resumeAgentRun } from "../../agent/orchestrator.js";
 import { getDefaultProvider, getConfiguredProvider, defaultModelFor } from "../../ai/router.js";
 import { prisma } from "../../database/client.js";
 import { NotFoundError } from "../../utils/errors.js";
-import { eventBus, type VolticEvent } from "../../events/eventBus.js";
+import { eventBus, type AgentEvent } from "../../events/eventBus.js";
 import { abortById } from "../../tasks/taskService.js";
 
 const createConversationSchema = z.object({
@@ -97,7 +97,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     };
 
     let agentRunId: string | undefined;
-    const unsubscribe = eventBus.onEvent((evt: VolticEvent) => {
+    const unsubscribe = eventBus.onEvent((evt: AgentEvent) => {
       if (!agentRunId) return;
       const payload = evt.payload as Record<string, unknown>;
       if (payload.agentRunId !== agentRunId) return;

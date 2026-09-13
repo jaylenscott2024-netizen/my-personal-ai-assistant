@@ -1,4 +1,4 @@
-# Voltic Lane AI backend — multi-stage build.
+# Jarvis backend — multi-stage build.
 FROM node:20-bookworm-slim AS base
 WORKDIR /app
 ENV NODE_ENV=production

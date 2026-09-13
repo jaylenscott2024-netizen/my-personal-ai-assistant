@@ -2,7 +2,7 @@
   "name": "voltic-lane-ai-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Voltic Lane AI backend - orchestration, memory, tools, and agent core.",
+  "description": "Jarvis backend - orchestration, memory, tools, and agent core. (Internal package name retained as voltic-lane-ai-backend.)",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"

@@ -1,4 +1,4 @@
-// Voltic Lane AI — core data model.
+// Jarvis — core data model.
 // Dev/test default is SQLite (file-based, zero external services).
 // Production points DATABASE_URL at Postgres; the schema is written to be
 // portable between the two (no SQLite- or Postgres-only column types).

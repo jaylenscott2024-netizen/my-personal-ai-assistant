@@ -15,7 +15,7 @@ async function githubRequest(path: string, init?: { method?: "GET" | "POST" | "P
     method: init?.method ?? "GET",
     headers: {
       authorization: `Bearer ${token}`,
-      "user-agent": "VolticLaneAI/0.1",
+      "user-agent": "Jarvis/0.1",
       accept: "application/vnd.github+json",
       "content-type": "application/json",
     },
