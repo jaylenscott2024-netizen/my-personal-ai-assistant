@@ -1,0 +1,36 @@
+version: "3.9"
+
+# Local/staging composition using the default SQLite database, persisted to
+# a named volume. This runs as-is with `docker compose up --build`.
+#
+# To run against Postgres instead: change `provider = "sqlite"` to
+# `provider = "postgresql"` in prisma/schema.prisma, run
+# `npx prisma migrate dev --name postgres_init` to generate a fresh
+# Postgres migration history (SQLite and Postgres migration SQL are not
+# interchangeable — you cannot reuse the SQLite migrations against
+# Postgres), then add a `postgres` service here and point DATABASE_URL at
+# it. See DEVELOPMENT.md for the full walkthrough. This is a genuine
+# one-time setup step, not a runtime toggle — Prisma fixes the database
+# provider per schema, it does not select it dynamically from the URL.
+services:
+  backend:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: file:/app/data/voltic.db
+      JWT_SECRET: ${JWT_SECRET:?set a real JWT_SECRET}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?set a real CREDENTIAL_ENCRYPTION_KEY}
+      DEFAULT_AI_PROVIDER: ${DEFAULT_AI_PROVIDER:-mock}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+    ports:
+      - "4000:4000"
+    volumes:
+      - backend-data:/app/data
+
+volumes:
+  backend-data:

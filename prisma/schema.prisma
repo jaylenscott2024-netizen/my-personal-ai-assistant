@@ -1,0 +1,312 @@
+// Voltic Lane AI — core data model.
+// Dev/test default is SQLite (file-based, zero external services).
+// Production points DATABASE_URL at Postgres; the schema is written to be
+// portable between the two (no SQLite- or Postgres-only column types).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String?
+  role         String   @default("owner") // owner | member | admin
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions      Session[]
+  conversations Conversation[]
+  memoryItems   MemoryItem[]
+  tasks         Task[]
+  approvals     Approval[]
+  integrations  Integration[]
+  activity      ActivityEvent[]
+  notifications Notification[]
+  scheduledTasks ScheduledTask[]
+  credentials   Credential[]
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  userAgent  String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+}
+
+// Encrypted-at-rest third-party credentials (API keys, OAuth tokens).
+// `secretEnc` holds an AES-256-GCM ciphertext; the plaintext never touches
+// logs, audit records, or model context. See SECURITY.md.
+model Credential {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider    String   // e.g. "anthropic", "openai", "gemini", "elevenlabs", "shopify", "github", "twilio", "google", "microsoft"
+  label       String?
+  secretEnc   String   // ciphertext
+  secretIv    String
+  secretTag   String
+  metadata    String?  // JSON string, non-secret config (e.g. shop domain)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, provider, label])
+}
+
+// ---------------------------------------------------------------------------
+// Conversation system
+// ---------------------------------------------------------------------------
+
+model Conversation {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String?
+  provider  String?
+  model     String?
+  metadata  String?  // JSON string
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages  Message[]
+  agentRuns AgentRun[]
+  tasks     Task[]
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String   // system | user | assistant | tool
+  content        String   // text content (tool results/tool calls stored as JSON string when role=tool)
+  toolCallsJson  String?  // JSON string of tool calls requested by the assistant
+  toolCallId     String?  // when role=tool, which call this responds to
+  provider       String?
+  model          String?
+  tokenUsage     String?  // JSON string {promptTokens, completionTokens}
+  createdAt      DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+
+model MemoryItem {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    String   // preference | project | task | fact | instruction
+  key         String?
+  content     String
+  importance  Int      @default(3) // 1 (low) - 5 (critical)
+  provenance  String   // "user_stated" | "inferred" | "task_result"
+  scope       String?  // free-form project/task scoping key
+  disabled    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  lastUsedAt  DateTime?
+
+  @@index([userId, category])
+}
+
+// ---------------------------------------------------------------------------
+// Tools / plugins
+// ---------------------------------------------------------------------------
+
+model ToolDefinition {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  version      String
+  description  String
+  inputSchema  String   // JSON schema string
+  outputSchema String?  // JSON schema string
+  permissions  String   // JSON array of permission strings
+  source       String   // "builtin" | "plugin" | "mcp"
+  pluginId     String?
+  enabled      Boolean  @default(true)
+  createdAt    DateTime @default(now())
+}
+
+model Plugin {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  version      String
+  description  String?
+  capabilities String?  // JSON array
+  config       String?  // JSON string, non-secret
+  enabled      Boolean  @default(true)
+  createdAt    DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Agent execution / tasks
+// ---------------------------------------------------------------------------
+
+model AgentRun {
+  id             String   @id @default(cuid())
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  taskId         String?
+  task           Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  provider       String
+  model          String
+  status         String   // running | completed | failed | cancelled
+  currentStep    Int      @default(0)
+  maxSteps       Int      @default(12)
+  startedAt      DateTime @default(now())
+  finishedAt     DateTime?
+  error          String?
+  finalResult    String?
+
+  toolCalls ToolCallRecord[]
+}
+
+model ToolCallRecord {
+  id          String   @id @default(cuid())
+  agentRunId  String
+  agentRun    AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+  toolName    String
+  input       String   // JSON string
+  output      String?  // JSON string
+  error       String?
+  status      String   // pending | approved | denied | executing | succeeded | failed
+  riskLevel   String   @default("low") // low | medium | high | critical
+  approvalId  String?
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  title       String
+  goal        String
+  status      String   // queued | planning | running | waiting_for_approval | paused | completed | failed | cancelled
+  plan        String?  // JSON string: ordered list of planned steps (adaptable)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  completedAt DateTime?
+
+  steps     TaskStep[]
+  approvals Approval[]
+  agentRuns AgentRun[]
+}
+
+model TaskStep {
+  id          String   @id @default(cuid())
+  taskId      String
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  index       Int
+  description String
+  status      String   // pending | running | waiting_for_approval | completed | failed | skipped
+  tool        String?
+  input       String?  // JSON string
+  output      String?  // JSON string
+  error       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Permissions & approvals
+// ---------------------------------------------------------------------------
+
+model Approval {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taskId      String?
+  task        Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  stepId      String?
+  tool        String
+  action      String
+  parameters  String   // JSON string
+  riskLevel   String   // low | medium | high | critical
+  status      String   @default("pending") // pending | approved | denied | expired
+  requestedAt DateTime @default(now())
+  resolvedAt  DateTime?
+  resolvedBy  String?
+  reason      String?
+}
+
+// ---------------------------------------------------------------------------
+// Integrations
+// ---------------------------------------------------------------------------
+
+model Integration {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     String   // openai | anthropic | gemini | elevenlabs | shopify | github | twilio | google | microsoft
+  status       String   @default("not_configured") // not_configured | configured | error | disabled
+  capabilities String?  // JSON array
+  config       String?  // JSON string, non-secret
+  lastHealthCheckAt DateTime?
+  lastHealthStatus  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, provider])
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling
+// ---------------------------------------------------------------------------
+
+model ScheduledTask {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  cronExpression String
+  taskTemplate String   // JSON string: {title, goal, toolAllowList?}
+  enabled      Boolean  @default(true)
+  lastRunAt    DateTime?
+  nextRunAt    DateTime?
+  createdAt    DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+model ActivityEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  type      String   // matches EventBus catalog, e.g. "tool.completed"
+  payload   String   // JSON string, secrets stripped
+  createdAt DateTime @default(now())
+
+  @@index([userId, type])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel   String   // desktop | email | sms (future)
+  title     String
+  body      String
+  status    String   @default("pending") // pending | sent | failed
+  createdAt DateTime @default(now())
+  sentAt    DateTime?
+}
