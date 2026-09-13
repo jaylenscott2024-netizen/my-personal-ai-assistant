@@ -1,4 +1,13 @@
-import type { ScreenRegion, UIElementNode, VisualEvent, VisualFrame, VisualProviderCapabilities, WindowSummary } from "./types.js";
+import type {
+  ContinuousCaptureOptions,
+  ContinuousFrameSample,
+  ScreenRegion,
+  UIElementNode,
+  VisualEvent,
+  VisualFrame,
+  VisualProviderCapabilities,
+  WindowSummary,
+} from "./types.js";
 
 // The contract every platform-specific Eyes implementation fulfills.
 // VisualPerceptionEngine (visualPerceptionEngine.ts) only ever talks to
@@ -8,12 +17,17 @@ import type { ScreenRegion, UIElementNode, VisualEvent, VisualFrame, VisualProvi
 // implementation detail beyond this seam.
 //
 // Every method here is either genuinely event-driven (start/stop the
-// event source, receive callbacks) or genuinely on-demand (one-shot
-// query, invoked when something specific is needed) — nothing in this
-// interface has a "poll every N ms" shape. A provider that can only offer
-// polling for a given capability should report that capability as
-// unsupported (`getCapabilities().windowEvents = false`, etc.) rather
-// than faking event-driven behavior with a hidden timer.
+// event source, receive callbacks), genuinely on-demand (one-shot query,
+// invoked when something specific is needed), or — for continuous visual
+// capture — driven by the platform's own low-latency capture technology
+// signaling that a new frame is ready (e.g. Windows DXGI Desktop
+// Duplication's `AcquireNextFrame`, which blocks until the GPU actually
+// has a new frame or a timeout elapses; it is not a `sleep(N); grab
+// pixels` loop). Nothing in this interface has a "poll every N ms" shape.
+// A provider that can only offer polling for a given capability should
+// report that capability as unsupported (`getCapabilities().windowEvents
+// = false`, `continuousCapture.supported = false`, etc.) rather than
+// faking event-driven or continuous behavior with a hidden timer.
 export interface VisualProvider {
   readonly platform: string;
 
@@ -52,4 +66,20 @@ export interface VisualProvider {
    *  and this throws NotConfiguredError rather than returning a fake
    *  frame or silently falling back to a generic screenshot utility. */
   captureFrame(region?: ScreenRegion): Promise<VisualFrame>;
+
+  /** Begins the CONTINUOUS visual capture stream: `onFrame` fires for
+   *  every tick the platform's native capture technology produces (up to
+   *  `options.captureFps`, adapted down to whatever the display/hardware
+   *  can actually sustain — never blocking or degrading the rest of Eyes
+   *  to force a specific rate), independent of any AI provider and
+   *  requiring no model request to advance. Most ticks carry only change
+   *  metadata; `options.processingFps` bounds how often a tick also
+   *  carries fully materialized pixels (see ContinuousFrameSample). Must
+   *  resolve once the stream is actually live. Providers that can't
+   *  support this report `continuousCapture.supported: false` and this
+   *  throws NotConfiguredError — it never falls back to a timer calling
+   *  `captureFrame()` repeatedly, which would just be screenshot polling
+   *  wearing this method's name. */
+  startContinuousCapture(options: ContinuousCaptureOptions, onFrame: (frame: ContinuousFrameSample) => void): Promise<void>;
+  stopContinuousCapture(): Promise<void>;
 }

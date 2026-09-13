@@ -6,6 +6,18 @@ import { ValidationError } from "../utils/errors.js";
 // activation config, which reset to defaults on every restart.
 export type ActivationMode = "push_to_talk" | "wake_word" | "clap" | "disabled";
 export type ClapPattern = "single" | "double" | "triple";
+// structural_only: window/UI-Automation semantic awareness only — Eyes
+// never starts the continuous visual capture stream, so zero pixels are
+// ever obtained. structural_plus_visual: the platform's continuous, GPU-
+// signaled capture stream (e.g. Windows DXGI Desktop Duplication) runs
+// for as long as Eyes is enabled — real pixels flow continuously into
+// Jarvis's local temporal buffer, at the rates eyesLocalCaptureFps/
+// eyesLocalProcessingFps configure. This is NOT "take a screenshot when
+// something significant happens" — that model has been removed. Whether
+// any of what's continuously captured ever leaves the process (to an AI
+// provider) remains a separate, always-explicit decision gated by
+// eyesAllowedProviders/permissions/model capability, unaffected by this
+// setting.
 export type EyesMode = "structural_only" | "structural_plus_visual";
 export type EyesAttentionMode = "auto" | "manual";
 export type EyesLatencyPolicy = "realtime" | "balanced" | "low_power";
@@ -28,10 +40,23 @@ export interface UserSettings {
   eyesUpdateLatencyPolicy: EyesLatencyPolicy;
   /** AI provider ids allowed to receive ANY visual context. Empty by default. */
   eyesAllowedProviders: string[];
-  /** How far back the in-memory temporal visual buffer reaches. */
+  /** How far back the in-memory temporal visual buffer reaches (its
+   *  long-range "warm" tier — see VisualHistory). */
   eyesHistorySeconds: number;
   /** How many captured keyframes that buffer may hold at once. */
   eyesMaxKeyframes: number;
+  /** Requested native continuous-capture rate (frames/sec) — the "local
+   *  Eyes FPS." Independent of any AI provider's transport rate; up to
+   *  60fps where the display/hardware actually supports it. Only takes
+   *  effect when eyesMode is "structural_plus_visual". */
+  eyesLocalCaptureFps: number;
+  /** How often a captured tick is worth fully materializing into a
+   *  pixel-bearing observation versus change-metadata only. Bounds local
+   *  CPU/memory cost of encoding, independent of eyesLocalCaptureFps. */
+  eyesLocalProcessingFps: number;
+  /** Upper bound on how many recent continuous-capture observations may
+   *  be buffered in memory at once (VisualHistory's hot-tier capacity). */
+  eyesMaxBufferedFrames: number;
 }
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
@@ -52,6 +77,9 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   eyesAllowedProviders: [],
   eyesHistorySeconds: 120,
   eyesMaxKeyframes: 12,
+  eyesLocalCaptureFps: 10,
+  eyesLocalProcessingFps: 2,
+  eyesMaxBufferedFrames: 90,
 };
 
 const ACTIVATION_MODES: ActivationMode[] = ["push_to_talk", "wake_word", "clap", "disabled"];
@@ -78,6 +106,9 @@ interface UserSettingsRow {
   eyesAllowedProviders: string;
   eyesHistorySeconds: number;
   eyesMaxKeyframes: number;
+  eyesLocalCaptureFps: number;
+  eyesLocalProcessingFps: number;
+  eyesMaxBufferedFrames: number;
 }
 
 function rowToSettings(row: UserSettingsRow): UserSettings {
@@ -107,6 +138,9 @@ function rowToSettings(row: UserSettingsRow): UserSettings {
     eyesAllowedProviders,
     eyesHistorySeconds: row.eyesHistorySeconds,
     eyesMaxKeyframes: row.eyesMaxKeyframes,
+    eyesLocalCaptureFps: row.eyesLocalCaptureFps,
+    eyesLocalProcessingFps: row.eyesLocalProcessingFps,
+    eyesMaxBufferedFrames: row.eyesMaxBufferedFrames,
   };
 }
 
@@ -144,6 +178,18 @@ export async function updateUserSettings(userId: string, updates: Partial<UserSe
   }
   if (updates.eyesMaxKeyframes !== undefined && (updates.eyesMaxKeyframes < 0 || updates.eyesMaxKeyframes > 120)) {
     throw new ValidationError("eyesMaxKeyframes must be between 0 and 120.");
+  }
+  // 60fps is the documented ceiling — "up to the requested rate," never a
+  // hard-coded assumption that hardware can sustain it; the platform
+  // capture loop is what actually adapts down if it can't.
+  if (updates.eyesLocalCaptureFps !== undefined && (updates.eyesLocalCaptureFps < 1 || updates.eyesLocalCaptureFps > 60)) {
+    throw new ValidationError("eyesLocalCaptureFps must be between 1 and 60.");
+  }
+  if (updates.eyesLocalProcessingFps !== undefined && (updates.eyesLocalProcessingFps < 1 || updates.eyesLocalProcessingFps > 60)) {
+    throw new ValidationError("eyesLocalProcessingFps must be between 1 and 60.");
+  }
+  if (updates.eyesMaxBufferedFrames !== undefined && (updates.eyesMaxBufferedFrames < 1 || updates.eyesMaxBufferedFrames > 600)) {
+    throw new ValidationError("eyesMaxBufferedFrames must be between 1 and 600.");
   }
 
   const current = await getUserSettings(userId);

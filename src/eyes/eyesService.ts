@@ -64,14 +64,15 @@ class EyesService {
 
   /** Re-applies every Eyes setting to an already-running engine, so a
    *  settings change takes effect without a restart (and without losing
-   *  the visual history built up so far). */
+   *  the visual history built up so far). Starts/stops the continuous
+   *  capture stream live if eyesMode actually changed. */
   async applySettings(userId: string, settings: UserSettings): Promise<void> {
     const engine = this.engines.get(userId);
     if (!engine) return;
     const options = engineOptionsFor(settings);
     engine.setLatencyPolicy(settings.eyesUpdateLatencyPolicy);
-    engine.setKeyframePolicy(options.keyframePolicy ?? {});
     engine.setHistoryLimits(options.historyLimits ?? {});
+    await engine.setContinuousCapturePolicy(options.continuousCapturePolicy ?? {});
   }
 
   /** Called once at server startup (mirrors scheduler.ts's
@@ -128,13 +129,19 @@ class EyesService {
   }
 }
 
-/** Translates user-facing settings into engine policy. Keyframe capture is
- *  enabled only by the explicit structural_plus_visual mode — in the
- *  default structural_only mode the engine never captures a pixel. */
+/** Translates user-facing settings into engine policy. Continuous visual
+ *  capture is started only by the explicit structural_plus_visual mode —
+ *  in the default structural_only mode the engine never starts the
+ *  capture stream, so zero pixels are ever obtained. */
 function engineOptionsFor(settings: UserSettings) {
   return {
     latencyPolicy: settings.eyesUpdateLatencyPolicy,
-    keyframePolicy: { enabled: settings.eyesMode === "structural_plus_visual" },
+    continuousCapturePolicy: {
+      enabled: settings.eyesMode === "structural_plus_visual",
+      captureFps: settings.eyesLocalCaptureFps,
+      processingFps: settings.eyesLocalProcessingFps,
+      maxBufferedFrames: settings.eyesMaxBufferedFrames,
+    },
     historyLimits: {
       maxAgeMs: settings.eyesHistorySeconds * 1000,
       maxFrames: settings.eyesMaxKeyframes,

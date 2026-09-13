@@ -35,7 +35,12 @@ export type VisualChangeKind =
   | "ui_property"
   | "ui_focus"
   | "notification"
-  | "snapshot";
+  | "snapshot"
+  /** Sourced from the continuous capture stream rather than a structural
+   *  OS event — a change in what the display actually looks like,
+   *  detected by the platform's own capture technology (e.g. DXGI dirty
+   *  rects), not tied to any particular window/UI Automation event. */
+  | "visual_motion";
 
 const CHANGE_KIND_BY_EVENT: Record<VisualEventType, VisualChangeKind> = {
   window_focus_changed: "window_focus",

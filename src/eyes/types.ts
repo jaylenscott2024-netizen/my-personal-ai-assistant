@@ -60,13 +60,92 @@ export interface WindowSummary {
   boundingBox: ScreenRegion | null;
 }
 
-// A single frame of pixel content, captured on demand (attention- or
-// tool-triggered — never on a fixed timer; see visualProvider.ts).
+// A single frame of pixel content. Two ways one of these comes to exist:
+// (1) on-demand, tool- or attention-triggered (`VisualProvider.captureFrame`)
+// — a one-shot "show me right now"; or (2) as part of the continuous
+// capture stream (`VisualProvider.startContinuousCapture`), where the
+// platform's native low-latency capture technology (e.g. Windows DXGI
+// Desktop Duplication) hands frames to Jarvis as the display actually
+// changes. Neither path is a screenshot-polling loop: (1) never fires on a
+// timer, and (2) is driven by the OS/GPU signaling a new frame is ready,
+// not by Jarvis asking for one on an interval.
 export interface VisualFrame {
   mimeType: "image/png" | "image/jpeg";
   base64: string;
   region: ScreenRegion | null;
   capturedAt: string;
+}
+
+// What a platform's continuous capture technology can actually do —
+// checked before ever starting it, and reported honestly (never faked
+// with a hidden capture-on-a-timer) when unsupported.
+export interface ContinuousCaptureCapabilities {
+  supported: boolean;
+  /** Human-identifiable name of the underlying technology, e.g.
+   *  "dxgi_desktop_duplication" — never invented; null when unsupported. */
+  technology: string | null;
+  /** A known hardware/display ceiling, when the platform can report one
+   *  up front. Null means "not known in advance — negotiated/observed at
+   *  runtime," which is the normal case: display refresh rate, GPU driver
+   *  behavior, and remote-desktop sessions all affect the real ceiling in
+   *  ways that can't be predicted before capture actually starts. */
+  maxCaptureFps: number | null;
+  /** Whether the platform can report which regions of the display
+   *  actually changed between frames without Jarvis having to diff pixels
+   *  itself (e.g. DXGI's own dirty-rect/move-rect reporting). */
+  supportsDirtyRects: boolean;
+  supportsMultiDisplay: boolean;
+  detail?: string;
+}
+
+// Requested parameters for the continuous capture stream. These are
+// requests, not guarantees — the platform capture loop adapts to what the
+// display/hardware can actually sustain rather than blocking or degrading
+// the rest of Jarvis to hit an unreachable number (Section: "prefer 'up to
+// the requested rate' with automatic adaptation").
+export interface ContinuousCaptureOptions {
+  /** Requested native capture rate — how often the platform's capture
+   *  technology should check for a new frame. This is the "local Eyes
+   *  FPS" and is completely independent of any AI provider's transport
+   *  rate; up to 60fps where the display/hardware actually supports it. */
+  captureFps: number;
+  /** How often a captured tick is actually worth fully materializing
+   *  (encoded to bytes and handed up to Jarvis) versus reported as
+   *  change-metadata only. Bounds local CPU/memory cost of encoding —
+   *  distinct from, and normally much lower than, captureFps. */
+  processingFps: number;
+  /** Upper bound on how many recent captured frames Jarvis's local
+   *  temporal buffer may hold at once (see VisualHistory). */
+  maxBufferedFrames: number;
+  /** Which display to capture; omit for the primary/active display. */
+  displayId?: string;
+}
+
+// One observation from the continuous capture stream, handed to the
+// engine's ingestion path. `frame` is populated only on ticks the capture
+// loop (or the engine's own processingFps enforcement) decided were worth
+// fully materializing — every other tick still carries real change
+// metadata (from the platform's own dirty-rect reporting where available),
+// so local motion/attention scoring never goes blind between materialized
+// frames.
+export interface ContinuousFrameSample {
+  /** Monotonically increasing per capture session — lets a consumer detect
+   *  gaps (dropped/coalesced ticks) without relying on timestamps alone. */
+  sequence: number;
+  atMs: number;
+  displayId: string;
+  width: number;
+  height: number;
+  /** Regions that changed since the previous tick, when the capture
+   *  technology can report them natively (e.g. DXGI dirty rects). Empty
+   *  does not mean "nothing changed" on a platform that can't report
+   *  regions — see `changeScore`. */
+  changedRegions: ScreenRegion[];
+  /** 0 (no detectable change) to 1 (near-total redraw), derived from
+   *  changed-region coverage — the raw signal AttentionManager-adjacent
+   *  scoring in the engine turns into attention/significance. */
+  changeScore: number;
+  frame: VisualFrame | null;
 }
 
 // The Eyes Engine's continuously-maintained understanding of the visual
@@ -124,7 +203,12 @@ export interface VisualProviderCapabilities {
   uiAutomationEvents: boolean;
   /** One-shot UI Automation tree queries (get_ui_tree, find_element, invoke, set_value, focus). */
   uiAutomationQueries: boolean;
-  /** On-demand (attention-triggered, never polled) pixel frame capture. */
+  /** On-demand (attention- or tool-triggered, never polled) single pixel
+   *  frame capture — a one-shot "show me right now", distinct from the
+   *  continuous capture stream below. */
   onDemandFrameCapture: boolean;
+  /** The platform's continuous, low-latency display capture technology,
+   *  if any — see ContinuousCaptureCapabilities. */
+  continuousCapture: ContinuousCaptureCapabilities;
   detail?: string;
 }

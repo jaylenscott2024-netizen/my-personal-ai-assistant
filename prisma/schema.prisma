@@ -96,6 +96,13 @@ model UserSettings {
   // of it to be written to disk.
   eyesHistorySeconds      Int     @default(120)
   eyesMaxKeyframes        Int     @default(12)
+  // Continuous capture rates ("local Eyes FPS"). Independent of any AI
+  // provider's transport rate — see EYES.md. 60 is the documented
+  // ceiling, never assumed reachable; the platform capture loop adapts
+  // down to whatever the display/hardware actually sustains.
+  eyesLocalCaptureFps     Int     @default(10)
+  eyesLocalProcessingFps  Int     @default(2)
+  eyesMaxBufferedFrames   Int     @default(90)
 
   updatedAt DateTime @updatedAt
 }

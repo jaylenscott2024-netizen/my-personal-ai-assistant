@@ -37,6 +37,12 @@ const eyesUpdateSchema = z.object({
    *  keeps in RAM. */
   eyesHistorySeconds: z.number().int().min(5).max(1800).optional(),
   eyesMaxKeyframes: z.number().int().min(0).max(120).optional(),
+  /** Continuous capture rates ("local Eyes FPS") — independent of any AI
+   *  provider's transport rate. 60 is a documented ceiling, never an
+   *  assumption the hardware can sustain it. */
+  eyesLocalCaptureFps: z.number().int().min(1).max(60).optional(),
+  eyesLocalProcessingFps: z.number().int().min(1).max(60).optional(),
+  eyesMaxBufferedFrames: z.number().int().min(1).max(600).optional(),
 });
 
 // Section 11/12/28/29/87/88: activation, voice, and identity settings are

@@ -29,6 +29,7 @@ export class UnsupportedVisualProvider implements VisualProvider {
       uiAutomationEvents: false,
       uiAutomationQueries: false,
       onDemandFrameCapture: false,
+      continuousCapture: { supported: false, technology: null, maxCaptureFps: null, supportsDirtyRects: false, supportsMultiDisplay: false, detail: this.reason },
       detail: this.reason,
     };
   }
@@ -71,5 +72,13 @@ export class UnsupportedVisualProvider implements VisualProvider {
 
   async captureFrame(): Promise<never> {
     throw new NotConfiguredError(`Jarvis Eyes on-demand frame capture on ${this.platform} (${this.reason})`);
+  }
+
+  async startContinuousCapture(): Promise<never> {
+    throw new NotConfiguredError(`Jarvis Eyes continuous visual capture on ${this.platform} (${this.reason})`);
+  }
+
+  async stopContinuousCapture(): Promise<void> {
+    // No-op: nothing was ever started.
   }
 }

@@ -15,14 +15,35 @@ export function importanceOf(attentionScore: number): VisualImportance {
 }
 
 export interface VisualHistoryLimits {
-  /** Hard cap on retained samples (structural records included). */
+  /** Hard cap on retained samples in the long-range (warm) tier —
+   *  structural/low-density retention, not every observation. */
   maxSamples: number;
-  /** Anything older than this is dropped, on write and on read. */
+  /** Anything older than this is dropped from the warm tier, on write and
+   *  on read — this is the user-facing `eyesHistorySeconds` window. */
   maxAgeMs: number;
-  /** Hard cap on how many retained samples may carry pixel data. */
+  /** Hard cap on how many retained samples (across all tiers) may carry
+   *  pixel data — the user-facing `eyesMaxKeyframes`. */
   maxFrames: number;
-  /** Approximate byte budget for retained pixel data. */
+  /** Approximate byte budget for retained pixel data, across all tiers. */
   maxFrameBytes: number;
+  /** Short, high-frequency buffer capacity: every accepted observation
+   *  from the continuous capture stream lands here first, uncondition-
+   *  ally, giving fine-grained "just now" motion/before-after recall
+   *  without needing the long-range tier to hold every single tick. Not
+   *  user-configurable — this is sizing detail, not a retention policy. */
+  hotMaxSamples: number;
+  hotMaxAgeMs: number;
+  /** Minimum spacing enforced when thinning hot-tier samples down into
+   *  the warm tier — this is what keeps "low frequency" actually low
+   *  frequency instead of mirroring the hot tier at the same density. */
+  warmBucketMs: number;
+  /** Salience floor for promotion into the warm tier ahead of its normal
+   *  time-bucket schedule — a significant change is worth remembering
+   *  long-range even if it happened moments after the last warm entry. */
+  warmSignificanceFloor: number;
+  /** Salience floor for promotion into the keyframe tier — this is the
+   *  "significant-event keyframes" bucket the retention model asks for. */
+  keyframeMinAttentionScore: number;
 }
 
 export const DEFAULT_VISUAL_HISTORY_LIMITS: VisualHistoryLimits = {
@@ -30,6 +51,11 @@ export const DEFAULT_VISUAL_HISTORY_LIMITS: VisualHistoryLimits = {
   maxAgeMs: 120_000,
   maxFrames: 12,
   maxFrameBytes: 24 * 1024 * 1024,
+  hotMaxSamples: 90,
+  hotMaxAgeMs: 8_000,
+  warmBucketMs: 2_000,
+  warmSignificanceFloor: 0.6,
+  keyframeMinAttentionScore: IMPORTANCE_FLOOR.high,
 };
 
 export interface VisualHistoryQuery {
@@ -52,32 +78,98 @@ export interface VisualHistoryStats {
   newestAtMs: number | null;
   droppedSamples: number;
   strippedFrames: number;
+  /** Per-tier counts, for observability into the retention model itself. */
+  tiers: { hot: number; warm: number; keyframes: number };
 }
 
-// Bounded, in-memory temporal visual memory.
+// A single bounded ring: append-only, evicts by count then by age,
+// oldest-first. Each tier below is one of these with its own limits and
+// promotion rule — the shared plumbing (eviction, byte accounting) lives
+// here so the three tiers can't drift into inconsistent eviction logic.
+class RingTier {
+  samples: VisualSample[] = [];
+  dropped = 0;
+
+  constructor(
+    private maxCount: number,
+    private maxAgeMs: number,
+  ) {}
+
+  add(sample: VisualSample, now: number): void {
+    this.samples.push(sample);
+    this.evict(now);
+  }
+
+  evict(now: number): void {
+    const cutoff = now - this.maxAgeMs;
+    if (this.samples.length > 0 && this.samples[0].atMs < cutoff) {
+      const kept = this.samples.filter((s) => s.atMs >= cutoff);
+      this.dropped += this.samples.length - kept.length;
+      this.samples = kept;
+    }
+    if (this.samples.length > this.maxCount) {
+      const excess = this.samples.length - this.maxCount;
+      this.samples.splice(0, excess);
+      this.dropped += excess;
+    }
+  }
+
+  clear(): void {
+    this.samples = [];
+  }
+}
+
+// Bounded, in-memory temporal visual memory — the three-tier model a
+// continuous capture stream actually needs: a HIGH-FREQUENCY SHORT BUFFER
+// (every observation, briefly) so fine motion/before-after questions work
+// at the moment they're asked, a LOW-FREQUENCY LONGER BUFFER (thinned,
+// longer-range recall without mirroring the hot tier's density) so "what
+// have I been doing" reaches back further, and SIGNIFICANT-EVENT
+// KEYFRAMES (salience-gated, retained longest) so the handful of moments
+// actually worth showing a model survive independently of both.
 //
-// This is what makes "what just happened?" answerable without any
-// screenshot polling: the engine records every accepted observation as it
-// occurs, so recent history already exists at the moment it's asked for.
+// Every accepted observation is written to the hot tier unconditionally,
+// and independently OFFERED to warm/keyframes based on each tier's own
+// promotion rule — the same VisualSample object is shared across tiers it
+// appears in (not copied), so stripping its pixels once (see the frame
+// budget below) is consistent everywhere it's retained.
 //
 // Retention rules that matter (Section 15: security):
 //  - Nothing here is ever written to the database. Process memory only.
-//  - Bounded four ways at once (count, age, frame count, frame bytes).
+//  - Every tier is independently bounded by count and age; pixels are
+//    additionally bounded by ONE combined frame count and byte budget
+//    scanned across all three tiers — a sample promoted into warm keeps
+//    whatever it arrived with (promotion never copies or strips), so the
+//    budget has to see it there too, not just in hot/keyframes, or a
+//    frame outliving hot's short window inside warm's much longer one
+//    would silently escape the bound entirely.
 //  - Under pixel pressure, frame payloads are stripped from the OLDEST
-//    frame-bearing samples first, keeping their structural record intact —
-//    so the timeline of what happened survives even when the imagery of it
-//    doesn't. Losing pixels degrades detail; losing the timeline would
-//    degrade correctness.
+//    frame-bearing samples first, keeping their structural record intact
+//    — so the timeline of what happened survives even when the imagery
+//    of it doesn't. Losing pixels degrades detail; losing the timeline
+//    would degrade correctness.
 export class VisualHistory {
-  private samples: VisualSample[] = [];
-  private droppedSamples = 0;
+  private hot: RingTier;
+  private warm: RingTier;
+  private keyframes: RingTier;
+  private newest: VisualSample | null = null;
   private strippedFrames = 0;
 
-  constructor(private limits: VisualHistoryLimits = DEFAULT_VISUAL_HISTORY_LIMITS) {}
+  private limits: VisualHistoryLimits;
+
+  constructor(limits: Partial<VisualHistoryLimits> = {}) {
+    this.limits = { ...DEFAULT_VISUAL_HISTORY_LIMITS, ...limits };
+    this.hot = new RingTier(this.limits.hotMaxSamples, this.limits.hotMaxAgeMs);
+    this.warm = new RingTier(this.limits.maxSamples, this.limits.maxAgeMs);
+    this.keyframes = new RingTier(this.limits.maxFrames * 4, this.limits.maxAgeMs); // count-bounded mainly by the shared frame budget below
+  }
 
   setLimits(limits: Partial<VisualHistoryLimits>): void {
     this.limits = { ...this.limits, ...limits };
-    this.enforceLimits(Date.now());
+    this.hot = rebuildTier(this.hot, this.limits.hotMaxSamples, this.limits.hotMaxAgeMs);
+    this.warm = rebuildTier(this.warm, this.limits.maxSamples, this.limits.maxAgeMs);
+    this.keyframes = rebuildTier(this.keyframes, this.limits.maxFrames * 4, this.limits.maxAgeMs);
+    this.enforceFrameBudget();
   }
 
   getLimits(): VisualHistoryLimits {
@@ -85,20 +177,44 @@ export class VisualHistory {
   }
 
   record(sample: VisualSample): void {
-    this.samples.push(sample);
-    this.enforceLimits(sample.atMs);
+    const now = sample.atMs;
+    this.newest = sample;
+    this.hot.add(sample, now);
+    this.maybePromoteToWarm(sample, now);
+    this.maybePromoteToKeyframe(sample, now);
+    this.enforceFrameBudget();
+  }
+
+  private maybePromoteToWarm(sample: VisualSample, now: number): void {
+    const last = this.warm.samples[this.warm.samples.length - 1];
+    const dueByTime = !last || sample.atMs - last.atMs >= this.limits.warmBucketMs;
+    const dueBySignificance = sample.attentionScore >= this.limits.warmSignificanceFloor;
+    if (dueByTime || dueBySignificance) this.warm.add(sample, now);
+  }
+
+  private maybePromoteToKeyframe(sample: VisualSample, now: number): void {
+    if (sample.frame && sample.attentionScore >= this.limits.keyframeMinAttentionScore) {
+      this.keyframes.add(sample, now);
+    }
   }
 
   latest(): VisualSample | null {
-    return this.samples.length > 0 ? this.samples[this.samples.length - 1] : null;
+    return this.newest;
   }
 
-  /** Oldest-first list of matching samples. */
+  /** Oldest-first list of matching samples, merged across all three tiers
+   *  with duplicates (a sample retained in more than one tier) collapsed. */
   query(query: VisualHistoryQuery = {}, now = Date.now()): VisualSample[] {
     this.evictExpired(now);
 
+    const merged = new Map<string, VisualSample>();
+    for (const tier of [this.hot, this.warm, this.keyframes]) {
+      for (const sample of tier.samples) merged.set(sample.id, sample);
+    }
+    const all = [...merged.values()].sort((a, b) => a.atMs - b.atMs);
+
     const minScore = query.minAttentionScore ?? (query.importance ? IMPORTANCE_FLOOR[query.importance] : undefined);
-    const matched = this.samples.filter((sample) => {
+    const matched = all.filter((sample) => {
       if (query.since !== undefined && sample.atMs < query.since) return false;
       if (query.until !== undefined && sample.atMs > query.until) return false;
       if (minScore !== undefined && sample.attentionScore < minScore) return false;
@@ -117,44 +233,61 @@ export class VisualHistory {
 
   stats(now = Date.now()): VisualHistoryStats {
     this.evictExpired(now);
-    const withFrames = this.samples.filter((s) => s.frame);
+
+    const merged = new Map<string, VisualSample>();
+    for (const tier of [this.hot, this.warm, this.keyframes]) {
+      for (const sample of tier.samples) merged.set(sample.id, sample);
+    }
+    const all = [...merged.values()];
+    const withFrames = all.filter((s) => s.frame);
+
     return {
-      samples: this.samples.length,
+      samples: all.length,
       frames: withFrames.length,
       approxFrameBytes: withFrames.reduce((total, s) => total + approximateSampleBytes(s), 0),
-      oldestAtMs: this.samples[0]?.atMs ?? null,
-      newestAtMs: this.samples[this.samples.length - 1]?.atMs ?? null,
-      droppedSamples: this.droppedSamples,
+      oldestAtMs: all.length > 0 ? Math.min(...all.map((s) => s.atMs)) : null,
+      newestAtMs: all.length > 0 ? Math.max(...all.map((s) => s.atMs)) : null,
+      droppedSamples: this.hot.dropped + this.warm.dropped + this.keyframes.dropped,
       strippedFrames: this.strippedFrames,
+      tiers: { hot: this.hot.samples.length, warm: this.warm.samples.length, keyframes: this.keyframes.samples.length },
     };
   }
 
   clear(): void {
-    this.samples = [];
+    this.hot.clear();
+    this.warm.clear();
+    this.keyframes.clear();
+    this.newest = null;
   }
 
   private evictExpired(now: number): void {
-    const cutoff = now - this.limits.maxAgeMs;
-    if (this.samples.length === 0 || this.samples[0].atMs >= cutoff) return;
-    const kept = this.samples.filter((s) => s.atMs >= cutoff);
-    this.droppedSamples += this.samples.length - kept.length;
-    this.samples = kept;
+    this.hot.evict(now);
+    this.warm.evict(now);
+    this.keyframes.evict(now);
   }
 
-  private enforceLimits(now: number): void {
-    this.evictExpired(now);
-
-    if (this.samples.length > this.limits.maxSamples) {
-      const excess = this.samples.length - this.limits.maxSamples;
-      this.samples.splice(0, excess);
-      this.droppedSamples += excess;
-    }
-
-    this.enforceFrameBudget();
-  }
-
+  // Shared byte/count budget across ALL THREE tiers. Warm-tier promotion
+  // doesn't strip pixels on its own — a sample keeps carrying whatever it
+  // arrived with (tiers share the same VisualSample object by reference,
+  // never a copy) — so this must scan every tier, not just hot/keyframes:
+  // a sample that ages out of hot but is still held by warm would
+  // otherwise never be reconsidered for eviction and could hold pixels
+  // for as long as warm's (much longer) retention window, silently
+  // breaking the frame/byte budget. Strips the OLDEST frame-bearing
+  // samples first; because tiers share objects by reference, stripping
+  // once is visible everywhere that sample is retained.
   private enforceFrameBudget(): void {
-    const framed = this.samples.filter((s) => s.frame);
+    const seen = new Set<string>();
+    const framed: VisualSample[] = [];
+    for (const tier of [this.hot, this.warm, this.keyframes]) {
+      for (const sample of tier.samples) {
+        if (!sample.frame || seen.has(sample.id)) continue;
+        seen.add(sample.id);
+        framed.push(sample);
+      }
+    }
+    framed.sort((a, b) => a.atMs - b.atMs);
+
     let frameCount = framed.length;
     let frameBytes = framed.reduce((total, s) => total + approximateSampleBytes(s), 0);
     if (frameCount <= this.limits.maxFrames && frameBytes <= this.limits.maxFrameBytes) return;
@@ -167,4 +300,12 @@ export class VisualHistory {
       this.strippedFrames++;
     }
   }
+}
+
+function rebuildTier(existing: RingTier, maxCount: number, maxAgeMs: number): RingTier {
+  const tier = new RingTier(maxCount, maxAgeMs);
+  tier.samples = existing.samples;
+  tier.dropped = existing.dropped;
+  tier.evict(Date.now());
+  return tier;
 }
