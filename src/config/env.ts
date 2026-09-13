@@ -11,7 +11,11 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
   HOST: z.string().default("0.0.0.0"),
-  DATABASE_URL: z.string().default("file:./prisma/dev.db"),
+  // Prisma resolves a relative sqlite file: path against prisma/schema.prisma's
+  // own directory, not the process's cwd — so this must be "./dev.db" (which
+  // resolves to prisma/dev.db), not "./prisma/dev.db" (which would resolve to
+  // the nonexistent prisma/prisma/dev.db).
+  DATABASE_URL: z.string().default("file:./dev.db"),
   JWT_SECRET: z
     .string()
     .min(16, "JWT_SECRET must be at least 16 characters")
@@ -110,6 +114,17 @@ function loadEnv(): AppEnv {
       }
     }
   }
+
+  // Prisma's generated client reads DATABASE_URL directly from process.env
+  // at construction time (see src/database/client.ts) — it has no
+  // knowledge of this schema's zod-level default. Without a real .env
+  // file, process.env.DATABASE_URL is genuinely undefined even though
+  // parsed.data.DATABASE_URL correctly resolved to the SQLite default, so
+  // the "SQLite by default (zero setup)" promise in .env.example would
+  // otherwise be broken on a fresh checkout. This writes the resolved
+  // value back so Prisma sees the same value the rest of the app does; it
+  // is a no-op whenever a real DATABASE_URL was already present.
+  process.env.DATABASE_URL = parsed.data.DATABASE_URL;
 
   return parsed.data;
 }

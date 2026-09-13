@@ -3,7 +3,10 @@ import path from "node:path";
 // Executed before any test file's imports resolve, so it must set process.env
 // before anything (including our own env.ts) reads it.
 process.env.NODE_ENV = "test";
-process.env.DATABASE_URL = `file:${path.resolve(process.cwd(), "prisma/test.db")}`;
+// Prisma's SQLite connection strings require forward slashes even on
+// Windows; path.resolve() returns backslash-separated paths there, so they
+// are normalized before being embedded in the file: URL.
+process.env.DATABASE_URL = `file:${path.resolve(process.cwd(), "prisma/test.db").split(path.sep).join("/")}`;
 process.env.LOG_LEVEL = "silent";
 process.env.FILESYSTEM_TOOL_ROOT = path.resolve(process.cwd(), "tests/.workspace");
 process.env.DEFAULT_AI_PROVIDER = "mock";
