@@ -11,6 +11,24 @@ const API_BASE = "https://api.elevenlabs.io/v1";
 // model").
 const DEFAULT_TTS_MODEL = "eleven_flash_v2_5";
 
+// Maps SynthesisOptions.voiceSettings (voice/types.ts) onto ElevenLabs'
+// own real, documented `voice_settings` request field — snake_case keys,
+// only the ones actually supplied. Nothing here is invented: every field
+// is a genuine ElevenLabs API parameter. Returns {} (spread to nothing)
+// when the caller didn't ask for anything, so ordinary calls are
+// byte-for-byte the same request they always were.
+function voiceSettingsBody(opts?: SynthesisOptions): { voice_settings?: Record<string, number | boolean> } {
+  const v = opts?.voiceSettings;
+  if (!v) return {};
+  const settings: Record<string, number | boolean> = {};
+  if (v.stability !== undefined) settings.stability = v.stability;
+  if (v.similarityBoost !== undefined) settings.similarity_boost = v.similarityBoost;
+  if (v.style !== undefined) settings.style = v.style;
+  if (v.useSpeakerBoost !== undefined) settings.use_speaker_boost = v.useSpeakerBoost;
+  if (v.speed !== undefined) settings.speed = v.speed;
+  return Object.keys(settings).length > 0 ? { voice_settings: settings } : {};
+}
+
 // Section 2/30: real, first-class ElevenLabs integration — TTS (buffered
 // and streaming), STT, and voice listing, with the API key resolved
 // through the same user-scoped encrypted credential store every other
@@ -57,7 +75,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
     const res = await request(`${API_BASE}/text-to-speech/${voice}`, {
       method: "POST",
       headers: { "xi-api-key": key, "content-type": "application/json", accept: "audio/mpeg" },
-      body: JSON.stringify({ text, model_id: opts?.model ?? DEFAULT_TTS_MODEL }),
+      body: JSON.stringify({ text, model_id: opts?.model ?? DEFAULT_TTS_MODEL, ...voiceSettingsBody(opts) }),
       signal: opts?.signal,
     });
     if (res.statusCode >= 400) {
@@ -81,7 +99,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
     const res = await request(`${API_BASE}/text-to-speech/${voice}/stream`, {
       method: "POST",
       headers: { "xi-api-key": key, "content-type": "application/json", accept: "audio/mpeg" },
-      body: JSON.stringify({ text, model_id: opts?.model ?? DEFAULT_TTS_MODEL, optimize_streaming_latency: 3 }),
+      body: JSON.stringify({ text, model_id: opts?.model ?? DEFAULT_TTS_MODEL, optimize_streaming_latency: 3, ...voiceSettingsBody(opts) }),
       signal: opts?.signal,
     });
     if (res.statusCode >= 400) {

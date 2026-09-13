@@ -21,6 +21,25 @@ export interface SynthesisOptions {
    *  (health checks) that should only ever use an operator env var. */
   userId?: string;
   signal?: AbortSignal;
+  /** Provider-specific delivery controls. Optional and additive: a
+   *  provider that doesn't expose one of these fields as a real,
+   *  documented parameter simply ignores it rather than approximating it
+   *  — this interface never invents an unsupported knob. Every field here
+   *  is a genuine parameter of at least one supported provider's API
+   *  (currently ElevenLabs' `voice_settings`); it is not a claim that
+   *  every provider honors every field. */
+  voiceSettings?: {
+    /** 0..1. Lower is more expressive/variable, higher is more monotone
+     *  and consistent. */
+    stability?: number;
+    /** 0..1. How closely to hew to the reference voice. */
+    similarityBoost?: number;
+    /** 0..1. Exaggerates the voice's own style; 0 disables it. */
+    style?: number;
+    useSpeakerBoost?: boolean;
+    /** Playback speed multiplier, where the provider supports one. */
+    speed?: number;
+  };
 }
 
 export interface TranscribeOptions {
