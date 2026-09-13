@@ -5,7 +5,16 @@ import crypto from "node:crypto";
 import { NotConfiguredError, ProviderError } from "../../../utils/errors.js";
 import { childLogger } from "../../../config/logger.js";
 import type { VisualProvider } from "../../visualProvider.js";
-import type { ScreenRegion, UIElementNode, VisualEvent, VisualFrame, VisualProviderCapabilities, WindowSummary } from "../../types.js";
+import type {
+  ContinuousCaptureOptions,
+  ContinuousFrameSample,
+  ScreenRegion,
+  UIElementNode,
+  VisualEvent,
+  VisualFrame,
+  VisualProviderCapabilities,
+  WindowSummary,
+} from "../../types.js";
 import { mapRawEventToVisualEvent, type RawWatcherEvent } from "./eventMapping.js";
 
 const log = childLogger("eyes.windows");
@@ -20,24 +29,47 @@ interface PendingCommand {
   timeout: NodeJS.Timeout;
 }
 
+// Shape of a `{"kind":"frame",...}` line from the watcher's continuous
+// capture loop (see eyesWatcher.ps1's DXGI section). `pixels` is present
+// only on ticks the capture loop (or its own processingFps enforcement)
+// chose to materialize; every other tick still carries real dirty-rect
+// change metadata.
+interface RawContinuousFrame {
+  sequence: number;
+  atMs: number;
+  displayId: string;
+  width: number;
+  height: number;
+  changedRegions?: ScreenRegion[];
+  changeScore: number;
+  pixels: { mimeType: "image/png" | "image/jpeg"; base64: string } | null;
+}
+
 // Real Windows implementation: a single persistent PowerShell/.NET helper
-// process (eyesWatcher.ps1) provides both the continuous, event-driven
-// window/UI-Automation event stream (via SetWinEventHook + UI Automation
-// event handlers — see that script for the full explanation) and one-shot
-// query commands (get_ui_tree, invoke, etc.) over a newline-JSON stdin/
-// stdout protocol, so queries don't pay the cost of spawning a fresh
-// process each time.
+// process (eyesWatcher.ps1) provides three independent things over one
+// newline-JSON stdin/stdout protocol, so nothing pays the cost of
+// spawning a fresh process per operation: (1) the structural, event-driven
+// window/UI-Automation stream (SetWinEventHook + UI Automation event
+// handlers), (2) one-shot query commands (get_ui_tree, invoke, etc.), and
+// (3) the CONTINUOUS visual capture stream — a background-thread DXGI
+// Desktop Duplication loop that hands frames up as the display actually
+// changes, entirely independent of (1)/(2) and of any AI provider.
 //
 // UNVERIFIED ON REAL WINDOWS HARDWARE — this development environment has
 // no Windows host. The IPC/process-management logic here is reviewable
 // and its message-parsing is unit-tested (eventMapping.test.ts), but
 // end-to-end behavior against a real `powershell.exe` has not been run.
+// The DXGI/D3D11 COM interop in eyesWatcher.ps1 is the single
+// highest-risk piece of native code in this codebase — see that file's
+// header for why, and validate it on real Windows hardware before relying
+// on it.
 export class WindowsVisualProvider implements VisualProvider {
   readonly platform = "windows";
   private child: ChildProcessWithoutNullStreams | null = null;
   private pending = new Map<string, PendingCommand>();
   private stdoutBuffer = "";
   private onEventCallback: ((event: VisualEvent) => void) | null = null;
+  private onFrameCallback: ((frame: ContinuousFrameSample) => void) | null = null;
   private windows: WindowSummary[] = [];
 
   get isRunning(): boolean {
@@ -51,6 +83,21 @@ export class WindowsVisualProvider implements VisualProvider {
       uiAutomationEvents: true,
       uiAutomationQueries: true,
       onDemandFrameCapture: true,
+      // DXGI Desktop Duplication is a real, GPU-signaled capture
+      // technology (AcquireNextFrame blocks until the display actually has
+      // a new frame, or times out — it is not a sleep-then-grab loop), but
+      // whether it actually initializes depends on runtime conditions this
+      // process can't know in advance (a real GPU adapter, an active
+      // (non-RDP-minimized) session, driver support) — reported honestly
+      // as unconfigured at startContinuousCapture() time if it fails,
+      // rather than claimed unconditionally here.
+      continuousCapture: {
+        supported: true,
+        technology: "dxgi_desktop_duplication",
+        maxCaptureFps: null, // display-refresh-dependent; not known until capture starts
+        supportsDirtyRects: true,
+        supportsMultiDisplay: true,
+      },
     };
   }
 
@@ -107,6 +154,7 @@ export class WindowsVisualProvider implements VisualProvider {
       this.child?.kill();
       this.child = null;
       this.onEventCallback = null;
+      this.onFrameCallback = null;
     }
   }
 
@@ -131,6 +179,20 @@ export class WindowsVisualProvider implements VisualProvider {
           if (visualEvent.window) this.updateWindowCache(visualEvent.window);
           this.onEventCallback?.(visualEvent);
         }
+      } else if (parsed.kind === "frame") {
+        // Continuous capture tick — routed on arrival, never buffered or
+        // batched here; the engine's own ingestion decides retention.
+        const raw = parsed as unknown as RawContinuousFrame;
+        this.onFrameCallback?.({
+          sequence: raw.sequence,
+          atMs: raw.atMs,
+          displayId: raw.displayId,
+          width: raw.width,
+          height: raw.height,
+          changedRegions: raw.changedRegions ?? [],
+          changeScore: raw.changeScore,
+          frame: raw.pixels ? { mimeType: raw.pixels.mimeType, base64: raw.pixels.base64, region: null, capturedAt: new Date(raw.atMs).toISOString() } : null,
+        });
       } else if (parsed.kind === "response" && typeof parsed.id === "string") {
         const pending = this.pending.get(parsed.id);
         if (!pending) continue;
@@ -201,5 +263,25 @@ export class WindowsVisualProvider implements VisualProvider {
   async captureFrame(region?: ScreenRegion): Promise<VisualFrame> {
     const data = (await this.sendCommand("capture_frame", { region })) as { mimeType: "image/png"; base64: string; region: ScreenRegion };
     return { mimeType: data.mimeType, base64: data.base64, region: data.region, capturedAt: new Date().toISOString() };
+  }
+
+  async startContinuousCapture(options: ContinuousCaptureOptions, onFrame: (frame: ContinuousFrameSample) => void): Promise<void> {
+    this.onFrameCallback = onFrame;
+    // The watcher's ack just confirms the DXGI capture loop actually
+    // initialized on its background thread — a real GPU/session failure
+    // (e.g. no adapter, an RDP session with capture disabled) surfaces as
+    // a rejection here rather than a silent no-op stream.
+    await this.sendCommand("start_continuous_capture", {
+      captureFps: options.captureFps,
+      processingFps: options.processingFps,
+      maxBufferedFrames: options.maxBufferedFrames,
+      displayId: options.displayId,
+    });
+  }
+
+  async stopContinuousCapture(): Promise<void> {
+    this.onFrameCallback = null;
+    if (!this.child) return;
+    await this.sendCommand("stop_continuous_capture", {}, 5000).catch(() => undefined);
   }
 }

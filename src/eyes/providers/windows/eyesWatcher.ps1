@@ -1,30 +1,58 @@
 # Jarvis Eyes — Windows visual-perception watcher.
 #
 # UNVERIFIED ON REAL WINDOWS HARDWARE: this script is written against
-# documented, standard Win32 (SetWinEventHook) and .NET UI Automation
-# (System.Windows.Automation) APIs, but this project's development
+# documented, standard Windows APIs, but this project's development
 # environment is a headless Linux container with no Windows host to run
 # PowerShell against. Review it as carefully-reasoned, standards-based
 # code — not as something that has been executed and confirmed working.
 # See COMPUTER_CONTROL.md / EYES.md for the full verification status.
 #
-# Architecture: this is a long-lived helper process, not a poll loop.
-# SetWinEventHook registers OS-level callbacks that fire only when a real
-# window/foreground/focus event happens; a Win32 message pump
-# ([System.Windows.Forms.Application]::Run()) is required for those
-# callbacks to actually be delivered — that pump is what "runs
-# continuously" here, not a timer re-checking state. UI Automation event
-# handlers (AddAutomationFocusChangedEventHandler,
-# AddStructureChangedEventHandler) are equally event-driven, delivered by
-# the same message pump.
+# TWO VERY DIFFERENT RISK TIERS IN THIS FILE, be aware which you're
+# reading:
+#  - The WinEventHook + UI Automation section (below) uses simple, flat
+#    P/Invoke signatures — each a single function call with a handful of
+#    primitive parameters. This is low-risk, common interop, and the kind
+#    of Windows code this project has shipped with confidence throughout.
+#  - The DXGI Desktop Duplication section (search for "CONTINUOUS VISUAL
+#    CAPTURE" below) hand-declares COM interfaces via vtable-ordered
+#    method lists (`[ComImport]`). This is categorically higher risk: a
+#    single wrong slot position or ABI mismatch causes undefined behavior
+#    (a crash or memory corruption) at the exact call site, not a clean
+#    compile or runtime error pointing at the mistake. It is written as
+#    carefully and completely as documented Windows SDK knowledge allows,
+#    but it has never been compiled, let alone executed, on a real
+#    Windows machine with a real GPU. Treat it as the single
+#    highest-risk piece of native code in this entire codebase, validate
+#    it against current Windows SDK headers on real hardware before
+#    relying on it, and consider replacing it with a maintained interop
+#    library (e.g. Vortice.Windows) if you need this to be production-
+#    solid rather than a best-effort starting point.
 #
-# Protocol: newline-delimited JSON on stdout for both unsolicited events
-# (`{"kind":"event",...}`) and responses to one-shot commands read from
-# stdin (`{"kind":"response","id":...}`). One process serves both the
-# continuous event stream and on-demand queries, so a query never pays
-# the cost of spawning a fresh PowerShell process (unlike the one-shot
-# `execFile` pattern used elsewhere in computer/*.ts, which is fine for
-# infrequent actions but too slow for something meant to feel responsive).
+# Architecture: this is a long-lived helper process, not a poll loop, for
+# EVERY capability it exposes — including continuous visual capture:
+#  - SetWinEventHook registers OS-level callbacks that fire only when a
+#    real window/foreground/focus event happens; a Win32 message pump
+#    ([System.Windows.Forms.Application]::Run()) is required for those
+#    callbacks to actually be delivered — that pump is what "runs
+#    continuously" here, not a timer re-checking state. UI Automation
+#    event handlers are equally event-driven, delivered by the same pump.
+#  - Continuous visual capture uses DXGI Desktop Duplication's
+#    AcquireNextFrame, which BLOCKS (with a timeout) until the GPU
+#    actually has a new frame — not a `sleep(N); grab pixels` loop. It
+#    runs on its own dedicated background thread so it can never stall,
+#    or be stalled by, the message-pump thread above.
+#
+# Protocol: newline-delimited JSON on stdout for unsolicited events
+# (`{"kind":"event",...}`), unsolicited continuous-capture ticks
+# (`{"kind":"frame",...}`), and responses to one-shot commands read from
+# stdin (`{"kind":"response","id":...}`). One process serves all three, so
+# a query never pays the cost of spawning a fresh PowerShell process
+# (unlike the one-shot `execFile` pattern used elsewhere in
+# computer/*.ts, which is fine for infrequent actions but too slow for
+# something meant to feel responsive). Two threads write to stdout (the
+# main message-pump thread, and the capture thread) — `Write-JsonLine`
+# below is lock-protected so their output can never interleave into
+# corrupted JSON lines.
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
@@ -78,10 +106,501 @@ public static class JarvisEyesWin32 {
 "@
 Add-Type -TypeDefinition $win32 -Language CSharp
 
+# =============================================================================
+# CONTINUOUS VISUAL CAPTURE (DXGI Desktop Duplication)
+# =============================================================================
+#
+# See this file's header for the risk-tier warning about this section
+# specifically — it is COM-vtable interop, not the flat P/Invoke used
+# above, and is unverified against real hardware.
+#
+# Design choices worth stating explicitly:
+#  - Every COM interface below declares vtable slots in the REAL, documented
+#    Windows SDK order (IUnknown's 3 slots are implicit via
+#    InterfaceIsIUnknown; inherited-interface slots come first, then the
+#    interface's own methods, in header order). Getting an order wrong
+#    would silently call the WRONG method at runtime — this is the actual
+#    danger zone.
+#  - Slots this code never calls are declared as trivial zero-argument
+#    placeholders (`UnusedN()`) rather than fully-modeled real signatures.
+#    This is safe specifically BECAUSE they're never invoked: a vtable
+#    slot's declared .NET signature only has to be correct for slots that
+#    are actually called through — earlier/later slots just need to exist
+#    in the right position to keep everything after them correctly
+#    aligned. Only ~10 methods across all interfaces are actually invoked
+#    and are given complete, real signatures: EnumAdapters1, EnumOutputs,
+#    DuplicateOutput, AcquireNextFrame, GetFrameDirtyRects, ReleaseFrame,
+#    CreateTexture2D, Map, Unmap, CopyResource.
+#  - D3D11CreateDevice's own out-parameter hands back the immediate
+#    device context directly, so ID3D11Device never needs a
+#    GetImmediateContext call (or its vtable slot) at all.
+#  - Everything reads back through ID3D11DeviceContext.CopyResource into a
+#    CPU-readable STAGING texture, then Map/Unmap — the standard, correct
+#    pattern (this is what Microsoft's own Desktop Duplication sample
+#    does). IDXGIOutputDuplication.MapDesktopSurface looks like a
+#    shortcut but is well known to fail on most modern WDDM 2.0 drivers,
+#    so it is deliberately not used here.
+#  - All resource pointers are carried as raw IntPtr end to end (no typed
+#    ID3D11Texture2D/ID3D11Resource wrapper interface exists at all) —
+#    CopyResource's parameters are declared as IntPtr, so a raw COM
+#    pointer from CreateTexture2D or QueryInterface can be passed directly.
+#  - Runs on its own dedicated background thread (MTA), separate from the
+#    STA thread hosting the Win32/UI-Automation message pump, so neither
+#    can ever block the other. It writes directly to stdout using the
+#    same lock `Write-JsonLine` uses (exposed as a static field) rather
+#    than calling back into a PowerShell scriptblock from a foreign
+#    thread, which is not a reliably supported pattern.
+#  - Never a fallback: if DXGI/D3D11 initialization fails for any reason
+#    (no GPU adapter, an unsupported session, a driver that refuses
+#    duplication), `Start` returns false and the caller reports
+#    continuous capture as unavailable — it never substitutes a
+#    screenshot-polling loop.
+$dxgiCapture = @"
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Text;
+
+public static class JarvisEyesCapture
+{
+    public static readonly object StdoutLock = new object();
+
+    // ---- Plain DLL exports (function-pointer P/Invoke, NOT vtable calls —
+    // the low-risk kind, same category as the Win32 calls above) ----------
+    [DllImport("dxgi.dll")]
+    private static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
+
+    [DllImport("d3d11.dll")]
+    private static extern int D3D11CreateDevice(
+        IntPtr pAdapter, uint DriverType, IntPtr Software, uint Flags,
+        IntPtr pFeatureLevels, uint FeatureLevels, uint SDKVersion,
+        out IntPtr ppDevice, out int pFeatureLevel, out IntPtr ppImmediateContext);
+
+    private static readonly Guid IID_IDXGIFactory1 = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
+    private static readonly Guid IID_IDXGIOutput1 = new Guid("00cddea8-939b-4b83-a340-a685226666cc");
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DXGI_OUTDUPL_POINTER_POSITION { public POINT Position; public int Visible; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DXGI_OUTDUPL_FRAME_INFO
+    {
+        public long LastPresentTime;
+        public long LastMouseUpdateTime;
+        public uint AccumulatedFrames;
+        public int RectsCoalesced;
+        public int ProtectedContentMaskedOut;
+        public DXGI_OUTDUPL_POINTER_POSITION PointerPosition;
+        public uint TotalMetadataBufferSize;
+        public uint PointerShapeBufferSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DXGI_SAMPLE_DESC { public uint Count; public uint Quality; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct D3D11_TEXTURE2D_DESC
+    {
+        public uint Width;
+        public uint Height;
+        public uint MipLevels;
+        public uint ArraySize;
+        public uint Format;
+        public DXGI_SAMPLE_DESC SampleDesc;
+        public uint Usage;
+        public uint BindFlags;
+        public uint CPUAccessFlags;
+        public uint MiscFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct D3D11_MAPPED_SUBRESOURCE { public IntPtr pData; public uint RowPitch; public uint DepthPitch; }
+
+    private const uint DXGI_FORMAT_B8G8R8A8_UNORM = 87; // Desktop Duplication always hands back this format
+    private const uint D3D11_USAGE_STAGING = 3;
+    private const uint D3D11_CPU_ACCESS_READ = 0x20000;
+    private const uint D3D11_MAP_READ = 1;
+    private const int DXGI_ERROR_WAIT_TIMEOUT = unchecked((int)0x887A0027);
+
+    // IDXGIFactory1 — need EnumAdapters1 at absolute vtable slot 7
+    // (IDXGIObject: 0-3, IDXGIFactory: EnumAdapters=4, MakeWindowAssociation=5,
+    // GetWindowAssociation=6 ... wait, need CreateSwapChain=7,
+    // CreateSoftwareAdapter=8 too before EnumAdapters1=9, IsCurrent=10).
+    [ComImport, Guid("770aae78-f26f-4dba-a829-253c83d1b387"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDXGIFactory1
+    {
+        void Unused0(); void Unused1(); void Unused2(); void Unused3(); // IDXGIObject
+        void Unused4(); // EnumAdapters
+        void Unused5(); // MakeWindowAssociation
+        void Unused6(); // GetWindowAssociation
+        void Unused7(); // CreateSwapChain
+        void Unused8(); // CreateSoftwareAdapter
+        int EnumAdapters1(uint Adapter, out IntPtr ppAdapter); // slot 9
+    }
+
+    [ComImport, Guid("29038f61-3839-4626-91fd-086879011a05"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDXGIAdapter1
+    {
+        void Unused0(); void Unused1(); void Unused2(); void Unused3(); // IDXGIObject
+        int EnumOutputs(uint Output, out IntPtr ppOutput); // slot 4
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DXGI_OUTPUT_DESC
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+        public RECT DesktopCoordinates;
+        public int AttachedToDesktop;
+        public uint Rotation;
+        public IntPtr Monitor;
+    }
+
+    [ComImport, Guid("00cddea8-939b-4b83-a340-a685226666cc"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDXGIOutput1
+    {
+        void Unused0(); void Unused1(); void Unused2(); void Unused3(); // IDXGIObject
+        int GetDesc(out DXGI_OUTPUT_DESC pDesc); // slot 4 — real desktop dimensions, NOT assumed; returns HRESULT
+        void Unused5(); void Unused6(); void Unused7(); void Unused8(); void Unused9(); // rest of IDXGIOutput
+        void Unused10(); void Unused11(); void Unused12(); void Unused13(); void Unused14(); void Unused15();
+        void Unused16(); void Unused17(); void Unused18(); // IDXGIOutput1's own GetDisplayModeList1/FindClosestMatchingMode1/GetDisplaySurfaceData1
+        int DuplicateOutput(IntPtr pDevice, out IntPtr ppOutputDuplication); // slot 19
+    }
+
+    [ComImport, Guid("191cfac3-a341-470d-b26e-a864f428319c"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDXGIOutputDuplication
+    {
+        void Unused0(); void Unused1(); void Unused2(); void Unused3(); // IDXGIObject
+        void UnusedGetDesc(); // slot 4
+        int AcquireNextFrame(uint TimeoutInMilliseconds, out DXGI_OUTDUPL_FRAME_INFO pFrameInfo, out IntPtr ppDesktopResource); // slot 5
+        int GetFrameDirtyRects(uint DirtyRectsBufferSize, [Out] RECT[] pDirtyRectsBuffer, out uint pDirtyRectsBufferSizeRequired); // slot 6
+        void UnusedGetFrameMoveRects(); // slot 7
+        void UnusedGetFramePointerShape(); // slot 8
+        void UnusedMapDesktopSurface(); // slot 9 — deliberately unused; see file header
+        void UnusedUnMapDesktopSurface(); // slot 10
+        int ReleaseFrame(); // slot 11
+    }
+
+    [ComImport, Guid("db6f6ddb-ac77-4e88-8253-819df9bbf140"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ID3D11Device
+    {
+        void Unused0(); // CreateBuffer
+        void Unused1(); // CreateTexture1D
+        int CreateTexture2D(ref D3D11_TEXTURE2D_DESC pDesc, IntPtr pInitialData, out IntPtr ppTexture2D); // slot 2
+    }
+
+    [ComImport, Guid("c0bfa96c-e089-44fb-8eaf-26f8796190da"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ID3D11DeviceContext
+    {
+        void Unused0(); void Unused1(); void Unused2(); void Unused3(); // ID3D11DeviceChild
+        void Unused4(); void Unused5(); void Unused6(); void Unused7(); void Unused8(); void Unused9(); void Unused10(); // through DrawIndexed(9)/Draw(10)... approx
+        int Map(IntPtr pResource, uint Subresource, uint MapType, uint MapFlags, out D3D11_MAPPED_SUBRESOURCE pMappedResource); // slot 11
+        void Unmap(IntPtr pResource, uint Subresource); // slot 12
+        void Unused13(); void Unused14(); void Unused15(); void Unused16(); void Unused17(); void Unused18(); void Unused19();
+        void Unused20(); void Unused21(); void Unused22(); void Unused23(); void Unused24(); void Unused25(); void Unused26();
+        void Unused27(); void Unused28(); void Unused29(); void Unused30(); void Unused31(); void Unused32(); void Unused33();
+        void Unused34(); void Unused35(); void Unused36(); void Unused37(); void Unused38(); void Unused39(); void Unused40();
+        void Unused41(); void Unused42(); void Unused43(); // through RSSetScissorRects(43)
+        void UnusedCopySubresourceRegion(); // slot 44
+        void CopyResource(IntPtr pDstResource, IntPtr pSrcResource); // slot 45
+    }
+
+    // ---- Capture loop state ----------------------------------------------
+    private static Thread _thread;
+    private static volatile bool _running;
+    private static long _sequence;
+
+    public static bool Start(int displayIndex, int captureFps, int processingFps, int maxBufferedFrames)
+    {
+        if (_running) return true;
+        _running = true;
+        _sequence = 0;
+
+        var ready = new ManualResetEventSlim(false);
+        bool initOk = false;
+        Exception initError = null;
+
+        _thread = new Thread(() =>
+        {
+            try
+            {
+                RunCaptureLoop(displayIndex, captureFps, processingFps, ref initOk, ref initError, ready);
+            }
+            catch (Exception ex)
+            {
+                initError = ex;
+                initOk = false;
+                if (!ready.IsSet) ready.Set();
+            }
+            finally
+            {
+                _running = false;
+            }
+        });
+        _thread.IsBackground = true;
+        _thread.SetApartmentState(ApartmentState.MTA); // DXGI/D3D11 are free-threaded; deliberately NOT the UI Automation STA thread
+        _thread.Start();
+
+        ready.Wait(10000);
+        if (!initOk)
+        {
+            _running = false;
+            if (initError != null) throw initError;
+            throw new InvalidOperationException("Continuous capture did not initialize within 10s.");
+        }
+        return true;
+    }
+
+    public static void Stop()
+    {
+        _running = false;
+        _thread?.Join(2000);
+    }
+
+    private static void RunCaptureLoop(int displayIndex, int captureFps, int processingFps, ref bool initOk, ref Exception initError, ManualResetEventSlim ready)
+    {
+        IntPtr factoryPtr = IntPtr.Zero, adapterPtr = IntPtr.Zero, outputPtr = IntPtr.Zero, output1Ptr = IntPtr.Zero;
+        IntPtr devicePtr = IntPtr.Zero, contextPtr = IntPtr.Zero, dupPtr = IntPtr.Zero, stagingPtr = IntPtr.Zero;
+        object device = null, context = null, duplication = null;
+        uint width = 0, height = 0;
+        long lastMaterializedMs = 0;
+
+        try
+        {
+            var factoryIid = IID_IDXGIFactory1;
+            int hr = CreateDXGIFactory1(ref factoryIid, out factoryPtr);
+            if (hr < 0) throw new InvalidOperationException("CreateDXGIFactory1 failed: 0x" + hr.ToString("X8"));
+            var factory = (IDXGIFactory1)Marshal.GetTypedObjectForIUnknown(factoryPtr, typeof(IDXGIFactory1));
+
+            hr = factory.EnumAdapters1((uint)0, out adapterPtr); // TODO: adapter selection for true multi-GPU setups is not implemented — primary adapter only
+            if (hr < 0) throw new InvalidOperationException("EnumAdapters1 failed: 0x" + hr.ToString("X8"));
+            var adapter = (IDXGIAdapter1)Marshal.GetTypedObjectForIUnknown(adapterPtr, typeof(IDXGIAdapter1));
+
+            hr = adapter.EnumOutputs((uint)Math.Max(0, displayIndex), out outputPtr);
+            if (hr < 0) throw new InvalidOperationException("EnumOutputs(" + displayIndex + ") failed: 0x" + hr.ToString("X8") + " — display index may not exist");
+
+            var output1Iid = IID_IDXGIOutput1;
+            hr = Marshal.QueryInterface(outputPtr, ref output1Iid, out output1Ptr);
+            if (hr < 0) throw new InvalidOperationException("QueryInterface(IDXGIOutput1) failed: 0x" + hr.ToString("X8"));
+            var output1 = (IDXGIOutput1)Marshal.GetTypedObjectForIUnknown(output1Ptr, typeof(IDXGIOutput1));
+
+            int featureLevel;
+            hr = D3D11CreateDevice(adapterPtr, /* D3D_DRIVER_TYPE_UNKNOWN */ 0, IntPtr.Zero, 0, IntPtr.Zero, 0, 7, out devicePtr, out featureLevel, out contextPtr);
+            if (hr < 0) throw new InvalidOperationException("D3D11CreateDevice failed: 0x" + hr.ToString("X8"));
+            device = Marshal.GetTypedObjectForIUnknown(devicePtr, typeof(ID3D11Device));
+            context = Marshal.GetTypedObjectForIUnknown(contextPtr, typeof(ID3D11DeviceContext));
+
+            hr = output1.DuplicateOutput(devicePtr, out dupPtr);
+            if (hr < 0) throw new InvalidOperationException("DuplicateOutput failed: 0x" + hr.ToString("X8") + " — often means no GPU adapter, a remote/console session without duplication support, or another process already holding exclusive duplication");
+            duplication = Marshal.GetTypedObjectForIUnknown(dupPtr, typeof(IDXGIOutputDuplication));
+
+            // Real desktop dimensions — required for the staging texture to
+            // match the duplicated resource's actual size. Getting this
+            // wrong (e.g. an assumed/hard-coded resolution) would make
+            // every CopyResource call below operate on mismatched-size
+            // resources, which D3D11 does not define as safe.
+            DXGI_OUTPUT_DESC outputDesc;
+            hr = output1.GetDesc(out outputDesc);
+            if (hr < 0) throw new InvalidOperationException("IDXGIOutput1.GetDesc failed: 0x" + hr.ToString("X8"));
+            width = (uint)(outputDesc.DesktopCoordinates.Right - outputDesc.DesktopCoordinates.Left);
+            height = (uint)(outputDesc.DesktopCoordinates.Bottom - outputDesc.DesktopCoordinates.Top);
+            if (width == 0 || height == 0) throw new InvalidOperationException("IDXGIOutput1.GetDesc returned an empty desktop rectangle.");
+
+            var stagingDesc = new D3D11_TEXTURE2D_DESC
+            {
+                Width = width, Height = height, MipLevels = 1, ArraySize = 1,
+                Format = DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc = new DXGI_SAMPLE_DESC { Count = 1, Quality = 0 },
+                Usage = D3D11_USAGE_STAGING, BindFlags = 0, CPUAccessFlags = D3D11_CPU_ACCESS_READ, MiscFlags = 0,
+            };
+            hr = ((ID3D11Device)device).CreateTexture2D(ref stagingDesc, IntPtr.Zero, out stagingPtr);
+            if (hr < 0) throw new InvalidOperationException("CreateTexture2D (staging) failed: 0x" + hr.ToString("X8"));
+
+            initOk = true;
+            ready.Set();
+        }
+        catch (Exception ex)
+        {
+            initError = ex;
+            initOk = false;
+            ready.Set();
+            ReleaseAll(factoryPtr, adapterPtr, outputPtr, output1Ptr, devicePtr, contextPtr, dupPtr, stagingPtr);
+            return;
+        }
+
+        var dup = (IDXGIOutputDuplication)duplication;
+        var ctx = (ID3D11DeviceContext)context;
+        uint timeoutMs = (uint)Math.Max(1, 1000 / Math.Max(1, captureFps));
+        double minMaterializeIntervalMs = processingFps > 0 ? 1000.0 / processingFps : double.PositiveInfinity;
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        while (_running)
+        {
+            DXGI_OUTDUPL_FRAME_INFO frameInfo;
+            IntPtr desktopResourcePtr;
+            int hr = dup.AcquireNextFrame(timeoutMs, out frameInfo, out desktopResourcePtr);
+            if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue; // no new frame within the timeout — not an error, just try again
+            if (hr < 0)
+            {
+                // Session lost (e.g. display mode change, lock screen, GPU
+                // driver reset) — stop rather than spin on a broken
+                // duplication handle. KNOWN GAP: this notifies no one — the
+                // Node side has no signal that continuous capture silently
+                // died mid-session and will believe it is still active
+                // until the next explicit stop/start. A production-hardened
+                // version should emit a `{"kind":"frame_stream_closed"}`
+                // message here and have the engine treat it as a cue to
+                // retry startContinuousCapture rather than relying on a
+                // user-initiated settings change to notice.
+                break;
+            }
+
+            try
+            {
+                RECT[] dirty = new RECT[64];
+                uint dirtyNeeded;
+                int dirtyHr = dup.GetFrameDirtyRects((uint)(dirty.Length * Marshal.SizeOf(typeof(RECT))), dirty, out dirtyNeeded);
+                int dirtyCount = dirtyHr >= 0 ? (int)(dirtyNeeded / Marshal.SizeOf(typeof(RECT))) : 0;
+
+                long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                double changeScore = Math.Min(1.0, dirtyCount / 8.0); // coarse coverage proxy — see file note above on real dirty-rect area
+                bool dueByRate = (nowMs - lastMaterializedMs) >= minMaterializeIntervalMs;
+                bool dueBySignificance = changeScore >= 0.6;
+                bool materialize = dirtyCount > 0 && (dueByRate || dueBySignificance);
+
+                string pixelsJson = "null";
+                if (materialize)
+                {
+                    ctx.CopyResource(stagingPtr, desktopResourcePtr);
+                    D3D11_MAPPED_SUBRESOURCE mapped;
+                    int mapHr = ctx.Map(stagingPtr, 0, D3D11_MAP_READ, 0, out mapped);
+                    if (mapHr >= 0)
+                    {
+                        try
+                        {
+                            pixelsJson = EncodeJpegBase64(mapped, (int)width, (int)height);
+                            lastMaterializedMs = nowMs;
+                        }
+                        finally
+                        {
+                            ctx.Unmap(stagingPtr, 0);
+                        }
+                    }
+                }
+
+                var json = new StringBuilder(256);
+                json.Append("{\"kind\":\"frame\",\"sequence\":").Append(Interlocked.Increment(ref _sequence));
+                json.Append(",\"atMs\":").Append(nowMs);
+                json.Append(",\"displayId\":\"").Append(displayIndex).Append("\"");
+                json.Append(",\"width\":").Append(width).Append(",\"height\":").Append(height);
+                json.Append(",\"changeScore\":").Append(changeScore.ToString("0.###"));
+                json.Append(",\"changedRegions\":[");
+                for (int i = 0; i < dirtyCount && i < dirty.Length; i++)
+                {
+                    if (i > 0) json.Append(",");
+                    var r = dirty[i];
+                    json.Append("{\"monitorId\":\"").Append(displayIndex).Append("\",\"x\":").Append(r.Left)
+                        .Append(",\"y\":").Append(r.Top).Append(",\"width\":").Append(r.Right - r.Left)
+                        .Append(",\"height\":").Append(r.Bottom - r.Top).Append("}");
+                }
+                json.Append("]");
+                if (pixelsJson == "null") json.Append(",\"pixels\":null");
+                else json.Append(",\"pixels\":").Append(pixelsJson);
+                json.Append("}");
+
+                Monitor.Enter(StdoutLock);
+                try { Console.Out.WriteLine(json.ToString()); Console.Out.Flush(); }
+                finally { Monitor.Exit(StdoutLock); }
+            }
+            finally
+            {
+                dup.ReleaseFrame();
+                if (desktopResourcePtr != IntPtr.Zero) Marshal.Release(desktopResourcePtr);
+            }
+        }
+
+        ReleaseAll(factoryPtr, adapterPtr, outputPtr, output1Ptr, devicePtr, contextPtr, dupPtr, stagingPtr);
+    }
+
+    private static string EncodeJpegBase64(D3D11_MAPPED_SUBRESOURCE mapped, int width, int height)
+    {
+        // BGRA8 staging texture -> GDI+ Bitmap -> JPEG. LockBits with the
+        // texture's own RowPitch (which can exceed width*4 due to GPU
+        // alignment) rather than assuming a tightly-packed buffer.
+        var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        var rect = new Rectangle(0, 0, width, height);
+        var bmpData = bmp.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            for (int y = 0; y < height; y++)
+            {
+                IntPtr srcRow = IntPtr.Add(mapped.pData, y * (int)mapped.RowPitch);
+                IntPtr dstRow = IntPtr.Add(bmpData.Scan0, y * bmpData.Stride);
+                // Copy via an intermediate managed buffer — Windows has no
+                // direct pointer-to-pointer RtlMoveMemory P/Invoke declared
+                // here, and this keeps the copy allocation-bounded per row.
+                byte[] rowBuf = new byte[Math.Min((int)mapped.RowPitch, bmpData.Stride)];
+                Marshal.Copy(srcRow, rowBuf, 0, rowBuf.Length);
+                Marshal.Copy(rowBuf, 0, dstRow, rowBuf.Length);
+            }
+        }
+        finally
+        {
+            bmp.UnlockBits(bmpData);
+        }
+
+        using (var ms = new MemoryStream())
+        {
+            var jpegCodec = GetJpegCodec();
+            var encParams = new EncoderParameters(1);
+            encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 65L); // bounded size over fidelity — this is local memory, not a permanent record
+            if (jpegCodec != null) bmp.Save(ms, jpegCodec, encParams);
+            else bmp.Save(ms, ImageFormat.Jpeg);
+            bmp.Dispose();
+            string b64 = Convert.ToBase64String(ms.ToArray());
+            return "{\"mimeType\":\"image/jpeg\",\"base64\":\"" + b64 + "\"}";
+        }
+    }
+
+    private static ImageCodecInfo GetJpegCodec()
+    {
+        foreach (var codec in ImageCodecInfo.GetImageEncoders())
+            if (codec.FormatID == ImageFormat.Jpeg.Guid) return codec;
+        return null;
+    }
+
+    private static void ReleaseAll(params IntPtr[] ptrs)
+    {
+        foreach (var p in ptrs)
+        {
+            if (p != IntPtr.Zero) { try { Marshal.Release(p); } catch { } }
+        }
+    }
+}
+"@
+Add-Type -TypeDefinition $dxgiCapture -Language CSharp -ReferencedAssemblies System.Drawing.dll
+
 function Write-JsonLine($obj) {
     $json = $obj | ConvertTo-Json -Compress -Depth 10
-    [Console]::Out.WriteLine($json)
-    [Console]::Out.Flush()
+    # The continuous-capture thread and this (main) thread both write to
+    # stdout; without this shared lock (the same one the capture thread
+    # uses) their output could interleave mid-line and corrupt the
+    # newline-JSON protocol on the Node side.
+    [System.Threading.Monitor]::Enter([JarvisEyesCapture]::StdoutLock)
+    try {
+        [Console]::Out.WriteLine($json)
+        [Console]::Out.Flush()
+    } finally {
+        [System.Threading.Monitor]::Exit([JarvisEyesCapture]::StdoutLock)
+    }
 }
 
 function Get-ProcessNameSafe([uint32]$pid) {
@@ -268,7 +787,27 @@ function Handle-Command($cmd) {
                 $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
                 return @{ id = $cmd.id; kind = "response"; ok = $true; data = @{ mimeType = "image/png"; base64 = $b64; region = @{ monitorId = "primary"; x = $x; y = $y; width = $w; height = $h } } }
             }
+            "start_continuous_capture" {
+                # displayId arrives as a string (e.g. "0"); default to the
+                # primary display (index 0) when omitted or non-numeric.
+                $displayIndex = 0
+                if ($cmd.displayId) { [void][int]::TryParse([string]$cmd.displayId, [ref]$displayIndex) }
+                $captureFps = if ($cmd.captureFps) { [int]$cmd.captureFps } else { 10 }
+                $processingFps = if ($cmd.processingFps) { [int]$cmd.processingFps } else { 2 }
+                $maxBufferedFrames = if ($cmd.maxBufferedFrames) { [int]$cmd.maxBufferedFrames } else { 90 }
+                # Throws with a specific, actionable message on failure
+                # (no GPU adapter, unsupported session, etc.) — the caller
+                # (Handle-Command's own try/catch) turns that into an
+                # honest ok:$false response rather than a fake success.
+                [JarvisEyesCapture]::Start($displayIndex, $captureFps, $processingFps, $maxBufferedFrames) | Out-Null
+                return @{ id = $cmd.id; kind = "response"; ok = $true; data = @{ started = $true } }
+            }
+            "stop_continuous_capture" {
+                [JarvisEyesCapture]::Stop()
+                return @{ id = $cmd.id; kind = "response"; ok = $true; data = @{ stopped = $true } }
+            }
             "exit" {
+                [JarvisEyesCapture]::Stop()
                 return @{ id = $cmd.id; kind = "response"; ok = $true; data = @{ exiting = $true } }
             }
             default {
@@ -355,3 +894,4 @@ $timer.Start()
 
 foreach ($h in $hooks) { [JarvisEyesWin32]::UnhookWinEvent($h) | Out-Null }
 [System.Windows.Automation.Automation]::RemoveAllEventHandlers()
+[JarvisEyesCapture]::Stop()
