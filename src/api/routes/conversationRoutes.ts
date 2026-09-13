@@ -11,6 +11,8 @@ import { runAgent, resumeAgentRun } from "../../agent/orchestrator.js";
 import { getDefaultProvider, getConfiguredProvider, defaultModelFor } from "../../ai/router.js";
 import { prisma } from "../../database/client.js";
 import { NotFoundError } from "../../utils/errors.js";
+import { eventBus, type VolticEvent } from "../../events/eventBus.js";
+import { abortById } from "../../tasks/taskService.js";
 
 const createConversationSchema = z.object({
   title: z.string().optional(),
@@ -69,6 +71,71 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       userMessage: body.message,
     });
     reply.send(outcome);
+  });
+
+  // Section 14: streaming variant of the same entrypoint — Server-Sent
+  // Events carrying incremental text deltas and tool activity as the
+  // agent orchestrator produces them, instead of waiting for the whole
+  // turn to finish. Uses the exact same runAgent()/permission/approval
+  // pipeline as the non-streaming route above; only the transport differs.
+  app.post("/conversations/:id/messages/stream", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = sendMessageSchema.parse(request.body);
+    const conversation = await getConversation(request.user!.id, id);
+
+    const providerId = body.provider ?? conversation.provider ?? getDefaultProvider().id;
+    const model = body.model ?? conversation.model ?? defaultModelFor(providerId);
+
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+
+    const sendEvent = (event: string, data: unknown) => {
+      reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    let agentRunId: string | undefined;
+    const unsubscribe = eventBus.onEvent((evt: VolticEvent) => {
+      if (!agentRunId) return;
+      const payload = evt.payload as Record<string, unknown>;
+      if (payload.agentRunId !== agentRunId) return;
+
+      if (evt.type === "message.delta") sendEvent("delta", payload);
+      else if (evt.type === "tool.started" || evt.type === "tool.completed" || evt.type === "tool.failed") {
+        sendEvent("tool", { kind: evt.type, ...payload });
+      } else if (evt.type === "agent.thinking") sendEvent("thinking", payload);
+    });
+
+    // If the client disconnects mid-stream, cancel the in-flight run
+    // rather than letting it keep consuming provider/tool resources for
+    // an answer nobody will see.
+    request.raw.on("close", () => {
+      if (agentRunId) abortById(agentRunId);
+    });
+
+    try {
+      const outcome = await runAgent({
+        userId: request.user!.id,
+        role: request.user!.role,
+        conversationId: id,
+        providerId,
+        model,
+        userMessage: body.message,
+        stream: true,
+        onAgentRunCreated: (runId) => {
+          agentRunId = runId;
+          sendEvent("run", { agentRunId: runId });
+        },
+      });
+      sendEvent("done", outcome);
+    } catch (err) {
+      sendEvent("error", { message: (err as Error).message });
+    } finally {
+      unsubscribe();
+      reply.raw.end();
+    }
   });
 
   app.post("/conversations/:id/agent-runs/:runId/resume", async (request, reply) => {
