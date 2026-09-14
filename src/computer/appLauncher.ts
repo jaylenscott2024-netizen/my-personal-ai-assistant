@@ -67,6 +67,27 @@ async function launchByTarget(app: DiscoveredApp): Promise<void> {
   child.unref();
 }
 
+// Runs a PowerShell -Command script that's expected to print a single
+// integer to stdout, returning that integer. execFile rejects on any
+// non-zero exit code from powershell.exe itself — which is not the same
+// thing as "the script's own logic failed," and has been observed to
+// happen on real Windows PowerShell 5.1 even after the script already
+// computed and printed a correct count. Node's execFile error objects
+// still carry whatever stdout was captured before the process exited,
+// so the count is recovered from there on a caught error too, rather
+// than the process's own exit code being treated as the source of
+// truth. Only falls back to 0 when stdout truly has no usable number
+// (the script never ran at all, e.g. powershell.exe itself is missing).
+async function runPowerShellForCount(script: string): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-Command", script], { timeout: 15_000 });
+    return parseInt(stdout.trim(), 10) || 0;
+  } catch (err) {
+    const stdout = (err as { stdout?: string }).stdout ?? "";
+    return parseInt(stdout.trim(), 10) || 0;
+  }
+}
+
 export async function closeApplication(query: string): Promise<{ closed: boolean; matchedProcesses: number }> {
   const platform = currentPlatform();
   const processNameHint = query.trim();
@@ -91,16 +112,22 @@ export async function closeApplication(query: string): Promise<{ closed: boolean
     // a real matching process is running. CommandLine can come back
     // null for a process the current user doesn't own (access denied),
     // in which case that process is still reachable via the Name match.
-    const { stdout } = await execFileAsync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-Command",
-        `$m = Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*${escaped}*' -or $_.CommandLine -like '*${escaped}*' }; $m | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; ($m | Measure-Object).Count`,
-      ],
-      { timeout: 15_000 },
-    );
-    const count = parseInt(stdout.trim(), 10) || 0;
+    //
+    // The whole body is wrapped in its own try/catch, with $count
+    // assigned unconditionally at the top: on real Windows PowerShell
+    // 5.1, Get-CimInstance/Stop-Process can leave the *process itself*
+    // (powershell.exe) exiting with a non-zero code even after the
+    // count was already correctly computed and printed — an unrelated
+    // CIM/WMI provider hiccup, an already-exited target process,
+    // per-process access errors, etc. -ErrorAction SilentlyContinue on
+    // Stop-Process only suppresses that one cmdlet's own error record;
+    // it does not guarantee the whole -Command invocation exits 0. This
+    // script-level try/catch ensures a clean, always-numeric stdout
+    // (falling back to 0) regardless of what goes wrong internally,
+    // rather than letting an unrelated error corrupt or block the one
+    // signal (the match count) this function actually depends on.
+    const script = `$count = 0; try { $m = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -like '*${escaped}*' -or $_.CommandLine -like '*${escaped}*' }); foreach ($p in $m) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }; $count = $m.Count } catch {}; $count`;
+    const count = await runPowerShellForCount(script);
     return { closed: count > 0, matchedProcesses: count };
   }
 
