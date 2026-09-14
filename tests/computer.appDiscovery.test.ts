@@ -1,13 +1,22 @@
 import { describe, it, expect } from "vitest";
 import { discoverApplications, matchApplications, type DiscoveredApp } from "../src/computer/appDiscovery.js";
+import { currentPlatform } from "../src/computer/platform.js";
 
 // This sandbox is Linux with real .desktop files under /usr/share/applications
 // (python3, LibreOffice, etc.) — so app discovery is genuinely exercised
-// here, not just mocked. Windows/macOS discovery paths are exercised by
-// the pure matchApplications() scoring logic below instead, since this
-// environment can't run PowerShell or enumerate /Applications.
+// here, not just mocked. Windows/macOS discovery paths are exercised
+// deterministically via mocked child_process/fs in
+// computer.appDiscoveryWindows.test.ts instead (this sandbox can't run
+// PowerShell or enumerate /Applications), and via the pure
+// matchApplications() scoring logic below, which is platform-agnostic.
 describe("discoverApplications (Linux .desktop files)", () => {
-  it("finds real applications installed in this environment", async () => {
+  // Genuinely platform-bound, not skipped to dodge a failure: this
+  // specifically asserts real .desktop-file discovery, which only exists
+  // on Linux. Run on an actual Windows machine, this same call reaches
+  // discoverWindowsApps() instead (real Get-StartApps output or its
+  // Start Menu shortcut fallback), which is exactly what
+  // computer.appDiscoveryWindows.test.ts verifies deterministically.
+  it.skipIf(currentPlatform() !== "linux")("finds real applications installed in this environment", async () => {
     const apps = await discoverApplications(true);
     expect(apps.length).toBeGreaterThan(0);
     expect(apps.every((a) => a.name && a.launchTarget)).toBe(true);

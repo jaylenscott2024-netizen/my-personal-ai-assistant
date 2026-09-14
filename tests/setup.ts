@@ -17,5 +17,13 @@ process.env.AGENT_APPROVAL_WAIT_MS = "400";
 // Fixed test allowlist — env.ts is a frozen singleton read once at import
 // time, so tests can't toggle this per-case via process.env; see
 // tests/computer.commandRunner.test.ts for how allow/deny is tested
-// against this fixed set instead.
-process.env.COMPUTER_COMMAND_ALLOWLIST = "echo,false";
+// against this fixed set instead. "node" is the one entry actually
+// executed (guaranteed present on every platform these tests run on,
+// unlike the POSIX-only "echo"/"false" external commands this used to
+// list — "echo" has no standalone executable on Windows at all, only a
+// cmd.exe built-in, so runAllowlistedCommand("echo", ...) genuinely
+// cannot resolve there; that's a real, unavoidable platform gap in the
+// FIXTURE choice, not in commandRunner's own allowlist logic). "false"
+// stays only as a second name to prove comma-separated parsing works —
+// it's never actually invoked.
+process.env.COMPUTER_COMMAND_ALLOWLIST = "node,false";

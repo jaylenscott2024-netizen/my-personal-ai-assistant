@@ -47,3 +47,29 @@ describe("pluginManager — disabling one plugin does not affect another", () =>
     expect(toolRegistry.has("plugin_a_tool_v2")).toBe(false);
   });
 });
+
+// Regression coverage for a real Windows bug found in review: a plugin
+// living under any directory containing a space (an entirely ordinary
+// Windows path — "C:\Users\name\My Documents\plugins\x.mjs", or this
+// project's own repo root if it's ever checked out somewhere like
+// "C:\projects\ai assistant\") failed to load with a "does the file
+// exist?" error. pathToFileURL() correctly percent-encodes the space
+// (".../My%20Documents/...") — the file:// URL is spec-correct — but
+// Vitest's own vite-node SSR loader resolves that URL by treating its
+// still-encoded pathname as a literal filesystem path without decoding
+// it first, so it looked for a file literally named "My%20Documents"
+// and failed. loadPlugin() now selectively un-encodes just the %20
+// sequences pathToFileURL() produces, which both vite-node's loader and
+// Node's own real ESM loader resolve correctly. This fixture directory
+// name is deliberately real (not simulated) so this exercises the exact
+// dynamic-import path production code goes through.
+describe("pluginManager — loading a plugin from a path containing a space", () => {
+  it("loads correctly even though the directory name contains a space", async () => {
+    const result = await loadPlugin(path.join(fixturesDir, "with a space", "pluginC.mjs"));
+    expect(result.name).toBe("plugin-c");
+    expect(toolRegistry.has("plugin_c_tool")).toBe(true);
+
+    await disablePlugin("plugin-c");
+    expect(toolRegistry.has("plugin_c_tool")).toBe(false);
+  });
+});

@@ -15,14 +15,35 @@ const execFileAsync = promisify(execFile);
 // allowed root, this blocks a fixed list of operating-system-critical
 // paths no legitimate "organize my files" request should ever touch.
 // Everything else is allowed, gated by permission + approval, not by path.
-const DANGEROUS_PATH_PATTERNS: RegExp[] =
-  currentPlatform() === "windows"
-    ? [/^[a-z]:\\windows(\\|$)/i, /^[a-z]:\\program files/i, /^[a-z]:\\programdata(\\|$)/i]
-    : [/^\/(bin|sbin|usr|etc|lib|lib64|boot|sys|proc|dev)(\/|$)/, /^\/System(\/|$)/, /^\/Library(\/|$)/];
+const POSIX_DANGEROUS_PATH_PATTERNS: RegExp[] = [/^\/(bin|sbin|usr|etc|lib|lib64|boot|sys|proc|dev)(\/|$)/, /^\/System(\/|$)/, /^\/Library(\/|$)/];
+const WINDOWS_DANGEROUS_PATH_PATTERNS: RegExp[] = [/^[a-z]:\\windows(\\|$)/i, /^[a-z]:\\program files/i, /^[a-z]:\\programdata(\\|$)/i];
+// Checked regardless of which platform Jarvis is actually running on
+// (see assertSafePath below for why) — a strict superset of either
+// platform's own native check, so this can only ever block MORE paths
+// than a single-platform list would, never fewer.
+const ALL_DANGEROUS_PATH_PATTERNS: RegExp[] = [...POSIX_DANGEROUS_PATH_PATTERNS, ...WINDOWS_DANGEROUS_PATH_PATTERNS];
 
 function assertSafePath(target: string): string {
-  const resolved = path.resolve(target.replace(/^~/, os.homedir()));
-  if (DANGEROUS_PATH_PATTERNS.some((pattern) => pattern.test(resolved))) {
+  const expanded = target.replace(/^~/, os.homedir());
+  const resolved = path.resolve(expanded);
+
+  // path.resolve() is platform-native, which silently defeats a
+  // cross-platform-shaped critical-path check if it only ran on the
+  // resolved output: on Windows, a POSIX-style input like "/etc/passwd"
+  // resolves relative to the current drive (e.g. "C:\etc\passwd" — a
+  // harmless-looking path with no leading "/etc"), so a check that only
+  // looked at the resolved path would never recognize this input as the
+  // well-known critical directory it names. Checking the raw input
+  // (before resolution) against BOTH POSIX- and Windows-style dangerous
+  // prefixes closes that gap: a caller (an LLM tool call, a path copied
+  // from documentation written for a different OS) could hand this
+  // either style regardless of which platform Jarvis actually runs on.
+  // The resolved path is still checked too — that's what catches
+  // traversal (e.g. "../../../../etc/passwd") that only becomes a
+  // critical path after normalization, which the raw-input check alone
+  // would miss since it doesn't look like a dangerous prefix pre-resolution.
+  const candidates = [expanded, resolved, expanded.replace(/\\/g, "/"), resolved.replace(/\\/g, "/")];
+  if (ALL_DANGEROUS_PATH_PATTERNS.some((pattern) => candidates.some((candidate) => pattern.test(candidate)))) {
     throw new ValidationError(`Refusing to operate on a system path: "${resolved}".`);
   }
   return resolved;

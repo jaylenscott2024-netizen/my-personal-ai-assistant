@@ -66,8 +66,22 @@ describe("computer file operations", () => {
   });
 
   it("refuses to operate on operating-system-critical paths", () => {
+    // These POSIX-style critical paths must be rejected regardless of
+    // which platform this actually runs on: assertSafePath checks the
+    // raw, pre-resolution input against both POSIX- and Windows-style
+    // dangerous prefixes specifically so this invariant doesn't depend
+    // on path.resolve()'s platform-native behavior (on Windows,
+    // path.resolve("/etc/passwd") resolves relative to the current
+    // drive, producing something that no longer starts with "/etc" at
+    // all — a check that only looked at the resolved path would miss
+    // this entirely).
     expect(() => assertSafePath("/usr/bin/something")).toThrow(ValidationError);
     expect(() => assertSafePath("/etc/passwd")).toThrow(ValidationError);
+  });
+
+  it("refuses windows-style critical paths regardless of the host platform", () => {
+    expect(() => assertSafePath("C:\\Windows\\System32\\config\\SAM")).toThrow(ValidationError);
+    expect(() => assertSafePath("C:\\Program Files\\Vendor\\app.exe")).toThrow(ValidationError);
   });
 
   it("allows ordinary user paths", () => {

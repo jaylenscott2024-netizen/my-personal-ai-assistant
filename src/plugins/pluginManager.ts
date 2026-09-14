@@ -1,5 +1,5 @@
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { z } from "zod";
 import { prisma } from "../database/client.js";
 import { toolRegistry } from "../tools/registry.js";
@@ -28,9 +28,36 @@ const pluginModuleSchema = z.object({
 // association has to live here, at the one place that actually knows it.
 const toolNamesByPlugin = new Map<string, string[]>();
 
+// Vitest's vite-node transform intercepts every dynamic import() call in
+// this project's own source and resolves the URL through its own SSR
+// module loader instead of Node's real one. That loader treats a file://
+// URL's *percent-encoded* pathname as a literal filesystem path without
+// decoding it first — so a plugin under any directory containing a space
+// (a completely ordinary Windows path, e.g. "C:\Users\name\My
+// Documents\plugins\x.mjs", which pathToFileURL turns into
+// ".../My%20Documents/...") fails with "does the file exist?" even
+// though the file is exactly there. Confirmed empirically that both
+// Node's real ESM loader and vite-node's loader accept a file:// URL
+// with a literal, unencoded space embedded directly — so pathToFileURL
+// is still used for correct encoding of everything else (drive letters,
+// non-ASCII characters, and URL-structural characters like # and ?),
+// and only the %20 sequences it produces are selectively un-encoded
+// afterward. This is not a workaround specific to the test runner: it
+// produces a URL string that both loaders resolve to the same file.
+function toModuleUrl(resolvedPath: string): string {
+  return pathToFileURL(resolvedPath).href.replace(/%20/g, " ");
+}
+
 export async function loadPlugin(absoluteOrRelativePath: string): Promise<{ name: string; toolsRegistered: number }> {
-  const resolved = path.resolve(absoluteOrRelativePath);
-  const moduleUrl = pathToFileURL(resolved).href;
+  // Accept either a plain filesystem path (the common case — an operator
+  // pointing at a local .mjs file) or an already-formed file:// URL,
+  // rather than assuming a bare path.resolve() is always correct: a
+  // caller-supplied "file://..." string would otherwise be mangled into
+  // a nonsense relative path (path.resolve() has no idea "file:" is a
+  // URL scheme, not a path segment).
+  const alreadyUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(absoluteOrRelativePath);
+  const resolved = alreadyUrl ? fileURLToPath(absoluteOrRelativePath) : path.resolve(absoluteOrRelativePath);
+  const moduleUrl = toModuleUrl(resolved);
   const imported = (await import(moduleUrl)) as { default?: unknown; tools?: ToolDefinition[] };
 
   const metadata = pluginModuleSchema.parse(imported.default ?? {});

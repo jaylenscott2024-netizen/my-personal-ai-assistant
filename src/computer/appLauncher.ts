@@ -80,9 +80,24 @@ export async function closeApplication(query: string): Promise<{ closed: boolean
     // quoted literal and run arbitrary PowerShell, with no approval gate
     // in the way (computer_close_application is requiresApproval: false).
     const escaped = processNameHint.replace(/'/g, "''");
+    // Matches against BOTH the bare process/image name (ProcessName,
+    // e.g. "notepad") AND the full command line (CommandLine, via
+    // Get-CimInstance Win32_Process — Get-Process alone exposes only the
+    // former). Matching only the bare name is not equivalent to
+    // Linux/macOS's `pkill -f`, which searches the full command line
+    // including arguments — a caller asking to close whatever process
+    // was launched with a distinguishing argument (not just image name)
+    // would silently find nothing under name-only matching, even though
+    // a real matching process is running. CommandLine can come back
+    // null for a process the current user doesn't own (access denied),
+    // in which case that process is still reachable via the Name match.
     const { stdout } = await execFileAsync(
       "powershell.exe",
-      ["-NoProfile", "-Command", `Get-Process | Where-Object { $_.ProcessName -like '*${escaped}*' } | Stop-Process -Force -PassThru | Measure-Object | Select-Object -ExpandProperty Count`],
+      [
+        "-NoProfile",
+        "-Command",
+        `$m = Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*${escaped}*' -or $_.CommandLine -like '*${escaped}*' }; $m | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; ($m | Measure-Object).Count`,
+      ],
       { timeout: 15_000 },
     );
     const count = parseInt(stdout.trim(), 10) || 0;

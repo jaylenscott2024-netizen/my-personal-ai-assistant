@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { currentPlatform } from "./platform.js";
@@ -42,14 +43,33 @@ export async function discoverApplications(forceRefresh = false): Promise<Discov
 // (both classic Win32 shortcuts and UWP/Store apps) without needing to
 // parse .lnk shortcut binaries or walk the registry by hand. AppID is
 // exactly what `explorer.exe shell:AppsFolder\<AppID>` or Start-Process
-// expects (appLauncher.ts). Unverified in this sandbox (no Windows host
-// available) — the PowerShell invocation itself is standard and stable
-// across modern Windows versions.
-async function discoverWindowsApps(): Promise<DiscoveredApp[]> {
+// expects (appLauncher.ts).
+async function discoverWindowsAppsViaPowerShell(): Promise<DiscoveredApp[]> {
   try {
     const { stdout } = await execFileAsync(
       "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", "Get-StartApps | ConvertTo-Json -Compress"],
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        // Bypass only affects this one child process's session, never a
+        // machine-wide policy change — added because a locked-down
+        // execution policy has been observed to silently block even a
+        // -Command invocation on some enterprise-managed machines, which
+        // otherwise looks identical to "no applications installed".
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        // Force UTF-8 output explicitly: PowerShell's default console
+        // output encoding for a redirected/piped stdout varies by
+        // Windows version and locale (historically UTF-16LE or the
+        // system's active codepage), which can corrupt non-ASCII
+        // application names and break ConvertTo-Json's output before
+        // Node ever sees it — Node decodes child process stdout as
+        // UTF-8, so a mismatch here silently turns into a JSON.parse
+        // failure (caught below, returning an empty list) rather than a
+        // visible error.
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-StartApps | ConvertTo-Json -Compress",
+      ],
       { timeout: 15_000 },
     );
     const parsed = JSON.parse(stdout.trim() || "[]");
@@ -66,6 +86,57 @@ async function discoverWindowsApps(): Promise<DiscoveredApp[]> {
     log.warn({ err }, "Windows application discovery failed (Get-StartApps)");
     return [];
   }
+}
+
+// Fallback source, scanning the same well-known Start Menu directories
+// Windows Explorer itself reads to build the visible Start Menu — the
+// same "read from where the OS actually registers apps" approach
+// discoverLinuxApps() below takes for .desktop files, using nothing but
+// plain filesystem access (no PowerShell, no Shell Experience Host
+// dependency). Get-StartApps can return zero results in sessions where
+// that shell infrastructure isn't fully initialized (a non-interactive
+// service session, some remote/scripted contexts, a locked-down
+// enterprise policy) even on a real desktop with real installed
+// applications — this ensures discovery doesn't silently report "no
+// applications" in that case. A .lnk shortcut file is directly launchable
+// via Start-Process, exactly like a real executable (see appLauncher.ts's
+// Windows fallback branch), so its own path is a valid launchTarget.
+async function discoverWindowsStartMenuShortcuts(): Promise<DiscoveredApp[]> {
+  const dirs = [
+    process.env.ProgramData ? path.join(process.env.ProgramData, "Microsoft", "Windows", "Start Menu", "Programs") : null,
+    process.env.APPDATA ? path.join(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs") : null,
+  ].filter((d): d is string => Boolean(d));
+
+  const apps: DiscoveredApp[] = [];
+  const seen = new Set<string>();
+
+  async function walk(dir: string): Promise<void> {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+        continue;
+      }
+      if (!entry.name.toLowerCase().endsWith(".lnk") || seen.has(fullPath)) continue;
+      seen.add(fullPath);
+      apps.push({ id: fullPath, name: entry.name.replace(/\.lnk$/i, ""), launchTarget: fullPath, source: "windows_start_apps" });
+    }
+  }
+
+  for (const dir of dirs) await walk(dir);
+  return apps;
+}
+
+async function discoverWindowsApps(): Promise<DiscoveredApp[]> {
+  const viaPowerShell = await discoverWindowsAppsViaPowerShell();
+  if (viaPowerShell.length > 0) return viaPowerShell;
+  return discoverWindowsStartMenuShortcuts();
 }
 
 // --- macOS: /Applications and ~/Applications are the two standard

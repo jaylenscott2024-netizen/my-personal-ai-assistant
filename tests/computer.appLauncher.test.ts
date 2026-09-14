@@ -9,11 +9,16 @@ afterEach(() => {
   dummyProcess = undefined;
 });
 
-// closeApplication shells out to `pkill` on Linux/macOS — this test spawns
-// a real long-running process under a distinctive name and verifies
-// closeApplication genuinely terminates it, rather than mocking the
-// process-management layer.
-describe("closeApplication (Linux)", () => {
+// closeApplication shells out to `pkill -f` on Linux/macOS (matches
+// against a process's full command line, including argv) and to
+// PowerShell's Get-CimInstance Win32_Process on Windows, matching
+// against BOTH the bare process name and the full CommandLine for the
+// same argv-matching parity — this test spawns a real long-running
+// process under a distinctive name (present only in argv, not the
+// process's own image name) and verifies closeApplication genuinely
+// terminates it on whichever platform this runs on, rather than mocking
+// the process-management layer.
+describe("closeApplication", () => {
   it("terminates a real running process matching the given name", async () => {
     const marker = `jarvis-test-dummy-${Date.now()}`;
     // Spawn Node directly (not `bash -c "sleep ... # marker"`) — bash's

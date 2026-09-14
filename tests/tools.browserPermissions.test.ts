@@ -26,6 +26,18 @@ describe("browserPermissionFor", () => {
 // gate in the way (browser_download only requires browser.interact).
 describe("resolveSafeDownloadPath — the download path-traversal guard", () => {
   const root = "/workspace/data";
+  // resolveSafeDownloadPath resolves workspaceRoot via path.resolve()
+  // before comparing anything against it, so its own internal boundary
+  // check is already platform-correct. But path.resolve() is
+  // platform-native: on Windows, a POSIX-style literal with no drive
+  // letter like "/workspace/data" resolves relative to the current
+  // drive (e.g. "C:\workspace\data"), not to the literal string
+  // "/workspace/data". Assertions here compare against this SAME
+  // resolved form — anything else would fail on Windows even when the
+  // actual security invariant (destination stays inside the workspace
+  // root) genuinely holds, and would silently stop verifying anything
+  // real if it were "fixed" by weakening the comparison instead.
+  const resolvedRoot = path.resolve(root);
 
   it("keeps an ordinary filename inside the workspace root, unchanged", () => {
     const { safeName, destPath } = resolveSafeDownloadPath(root, "report.pdf");
@@ -37,18 +49,22 @@ describe("resolveSafeDownloadPath — the download path-traversal guard", () => 
     const { safeName, destPath } = resolveSafeDownloadPath(root, "../../../etc/cron.d/evil");
     expect(safeName).toBe("evil");
     expect(destPath).toBe(path.resolve(root, "evil"));
-    expect(destPath.startsWith(root)).toBe(true);
+    expect(destPath.startsWith(resolvedRoot)).toBe(true);
   });
 
   it("strips a windows-style traversal payload the same way", () => {
-    const { safeName } = resolveSafeDownloadPath(root, "..\\..\\evil.exe");
-    // On the platform this test actually runs on (posix), a backslash is
-    // just a filename character to path.basename, not a separator — so
-    // the whole string survives as one "filename." What matters for
-    // safety either way: the result never contains a raw ".." path
-    // segment capable of climbing directories once resolved.
+    const { safeName, destPath } = resolveSafeDownloadPath(root, "..\\..\\evil.exe");
+    // On POSIX, a backslash is just a filename character to
+    // path.basename, not a separator, so the whole string survives as
+    // one "filename" — still safe, since it's then treated as an
+    // opaque (if odd-looking) filename rather than a path. On Windows,
+    // path.basename is separator-aware for both "/" and "\\", so this
+    // correctly strips down to "evil.exe" the same way the posix
+    // payload above does. Either way, the result must never contain a
+    // raw ".." path segment capable of climbing directories once
+    // resolved, and the resolved destination must stay inside the root.
     expect(safeName).not.toBe("..");
-    expect(resolveSafeDownloadPath(root, "..\\..\\evil.exe").destPath.startsWith(root)).toBe(true);
+    expect(destPath === resolvedRoot || destPath.startsWith(resolvedRoot + path.sep)).toBe(true);
   });
 
   it("rejects the bare '..' edge case basename cannot strip", () => {
@@ -60,10 +76,26 @@ describe("resolveSafeDownloadPath — the download path-traversal guard", () => 
   });
 
   it("never produces a destPath outside the workspace root for any input", () => {
-    const payloads = ["../secret", "../../../../root/.ssh/authorized_keys", "a/../../b", "....//....//etc/passwd"];
+    // Covers posix traversal, mixed/obfuscated separators, an
+    // already-absolute posix path with no ".." at all, a Windows
+    // drive-relative reference (no separator — "C:foo" means "relative
+    // to the current directory on drive C", not "C:\foo"), a UNC-style
+    // path, and an already-absolute Windows path — every one of these
+    // is a real shape a Content-Disposition filename could take.
+    const payloads = [
+      "../secret",
+      "../../../../root/.ssh/authorized_keys",
+      "a/../../b",
+      "....//....//etc/passwd",
+      "..\\..\\..\\Windows\\System32\\config\\SAM",
+      "/etc/passwd",
+      "C:evil.exe",
+      "C:\\Windows\\System32\\evil.dll",
+      "\\\\server\\share\\evil.exe",
+    ];
     for (const payload of payloads) {
       const { destPath } = resolveSafeDownloadPath(root, payload);
-      expect(destPath === root || destPath.startsWith(root + path.sep)).toBe(true);
+      expect(destPath === resolvedRoot || destPath.startsWith(resolvedRoot + path.sep)).toBe(true);
     }
   });
 });
