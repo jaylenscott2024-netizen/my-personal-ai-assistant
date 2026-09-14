@@ -113,20 +113,27 @@ export async function closeApplication(query: string): Promise<{ closed: boolean
     // null for a process the current user doesn't own (access denied),
     // in which case that process is still reachable via the Name match.
     //
-    // The whole body is wrapped in its own try/catch, with $count
-    // assigned unconditionally at the top: on real Windows PowerShell
-    // 5.1, Get-CimInstance/Stop-Process can leave the *process itself*
-    // (powershell.exe) exiting with a non-zero code even after the
-    // count was already correctly computed and printed — an unrelated
-    // CIM/WMI provider hiccup, an already-exited target process,
-    // per-process access errors, etc. -ErrorAction SilentlyContinue on
-    // Stop-Process only suppresses that one cmdlet's own error record;
-    // it does not guarantee the whole -Command invocation exits 0. This
-    // script-level try/catch ensures a clean, always-numeric stdout
-    // (falling back to 0) regardless of what goes wrong internally,
-    // rather than letting an unrelated error corrupt or block the one
-    // signal (the match count) this function actually depends on.
-    const script = `$count = 0; try { $m = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -like '*${escaped}*' -or $_.CommandLine -like '*${escaped}*' }); foreach ($p in $m) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }; $count = $m.Count } catch {}; $count`;
+    // Real Windows machines always have several processes an ordinary
+    // (even administrator) token cannot fully enumerate — "Secure
+    // System", "Registry", "Memory Compression", certain AV/EDR service
+    // processes — and Get-CimInstance surfaces those as per-object
+    // access-denied errors while it streams results. Under
+    // -ErrorAction Stop, ONE such error on ANY object in the whole
+    // Win32_Process table converts into a terminating exception for the
+    // entire cmdlet call, aborting the enumeration before it ever
+    // reaches the actual target process — regardless of where that
+    // target sits in the process table. That previously meant this
+    // silently found nothing on every real Windows machine (this repo's
+    // own dev sandbox has none of these protected processes, so it
+    // never surfaced there). Get-CimInstance is therefore left at its
+    // default error handling (SilentlyContinue): it skips whatever
+    // individual objects it cannot fully read and keeps enumerating
+    // everything else, including this ordinary, same-user target
+    // process. $count is still assigned unconditionally at the top and
+    // the whole body wrapped in try/catch, as a backstop against a
+    // genuinely fatal CIM/WMI failure (the service itself unavailable),
+    // which does still throw regardless of -ErrorAction.
+    const script = `$count = 0; try { $m = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*${escaped}*' -or $_.CommandLine -like '*${escaped}*' }); foreach ($p in $m) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} }; $count = $m.Count } catch {}; $count`;
     const count = await runPowerShellForCount(script);
     return { closed: count > 0, matchedProcesses: count };
   }

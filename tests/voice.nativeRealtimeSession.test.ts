@@ -99,7 +99,19 @@ class FakeRealtimeProvider implements RealtimeAudioProvider {
   }
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+// Each tool-call test performs at least one real bcrypt-hashed
+// registerUser() (SALT_ROUNDS = 12, a genuine cost factor — see
+// src/auth/passwords.ts) plus several real Prisma writes before the
+// event loop below ever starts. That's routinely well under a second on
+// a dev sandbox, but bcrypt at this cost and SQLite-via-Prisma I/O are
+// both markedly slower on a loaded or virtualized CI machine (Windows
+// runners in particular) — a 2s budget for the *whole* tool-call
+// round-trip left no margin for that, causing this to time out even
+// though the underlying permission check was correct and had already
+// completed; see the "denies a tool call" test's own setup below for
+// the other half of this fix (it no longer performs a second, unused
+// registration on top of that cost).
+async function waitFor(predicate: () => boolean, timeoutMs = 8000): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) throw new Error("waitFor: condition never became true");
@@ -255,10 +267,17 @@ describe("NativeRealtimeSession — tool calls go through the real permission pa
   });
 
   it("denies a tool call the role does not have permission for, same as the text agent path", async () => {
-    const { conversationId } = await makeUserAndConversation();
-    // A "member" role holds no write permissions by default (security/permissionService.ts).
+    // A "member" role holds no write permissions by default
+    // (security/permissionService.ts). Only one user is registered here
+    // (createConversation() takes any valid userId — it doesn't need to
+    // match the session's own role) rather than one via
+    // makeUserAndConversation() plus a second, separate "member"
+    // registration: each registerUser() call is a genuine bcrypt hash at
+    // a real cost factor, and this test doesn't need two of them.
     const memberEmail = `native-realtime-member-${Date.now()}@example.com`;
     const { user: member } = await registerUser(memberEmail, "a-strong-password");
+    const conversation = await createConversation(member.id, "native-realtime-test", "mock", "mock-1");
+    const conversationId = conversation.id;
 
     toolRegistry.register({
       name: "test_high_permission",
